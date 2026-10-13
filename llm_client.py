@@ -180,7 +180,7 @@ class LLMClient:
             return None
         context = "\n".join(f"{speaker}: {text}" for speaker, text in lines[:last_me]) or "(ninguno)"
         message = NOTE_MESSAGE.format(context=context, newest=lines[last_me][1])
-        return self._complete(message, on_start, on_token, drop_unsupported=True)
+        return self._complete(message, on_start, on_token)
 
     def warm_up(self) -> None:
         """Procesa el prompt del sistema una vez para que la primera pregunta real sea rápida."""
@@ -190,21 +190,19 @@ class LLMClient:
         print(f"[llm] Prompt precalentado en {time.time() - t0:.1f}s")
 
     def _complete(self, user_message: str, on_start: Callable[[], None],
-                  on_token: Callable[[str], None], drop_unsupported: bool = False) -> str | None:
+                  on_token: Callable[[str], None]) -> str | None:
         """Retiene los primeros tokens hasta saber si es NO_ACTION, para que el HUD no parpadee."""
         tokens = filter_no_action(self._stream(user_message))
         if self.knowledge:
             # Con conocimiento se verifica la respuesta completa antes de mostrarla: un 7B inventa
-            # porcentajes y rutas de menú aunque el prompt lo prohíba.
+            # porcentajes y rutas de menú aunque el prompt lo prohíba. Se muestra igual, marcada.
             text = "".join(tokens).strip()
             if not text:
                 return None
             problem = unsupported_claim(text, self.knowledge)
             if problem:
-                print(f"[llm] Descartado (no está en el conocimiento: {problem}): {text}")
-                if drop_unsupported:
-                    return None
-                text = f"⚠ No lo tengo documentado ({problem}). Lo confirmo y te lo paso hoy."
+                print(f"[llm] Sin verificar (no está en el conocimiento: {problem}): {text}")
+                text = f"{text}  (⚠ sin verificar: {problem})"
             on_start()
             on_token(text)
             return text
