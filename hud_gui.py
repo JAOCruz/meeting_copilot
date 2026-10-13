@@ -107,7 +107,7 @@ class HudWindow(QWidget):
             "QScrollBar::add-line, QScrollBar::sub-line { height: 0; }")
         self._entries: list[list[str]] = session_store.load()  # [tipo, prefijo, texto]; sobrevive reinicios
         self._suggestion_font = cfg.hud_font_size
-        QTimer.singleShot(0, self._render)  # muestra la sesión recuperada
+        QTimer.singleShot(0, self._show_restored)
 
         self.ask_input = QLineEdit()
         self.ask_input.setPlaceholderText("Pregunta rápida… (Enter)")
@@ -167,6 +167,12 @@ class HudWindow(QWidget):
         if text:
             self.ask_input.clear()
             self._signals.ask.emit(text)
+
+    def _show_restored(self) -> None:
+        """Muestra la sesión recuperada empezando por lo último (solo esta vez; luego no hay scroll automático)."""
+        self._render()
+        bar = self.feed.verticalScrollBar()
+        bar.setValue(bar.maximum())
 
     def transcript_lines(self) -> list[tuple[str, str]]:
         """Frases guardadas de la sesión, para devolverle el contexto al LLM tras un reinicio."""
