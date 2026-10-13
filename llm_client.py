@@ -1,6 +1,7 @@
 """Cliente para LM Studio (API compatible con OpenAI) con detección de NO_ACTION en streaming."""
 import re
 import time
+from difflib import SequenceMatcher
 import unicodedata
 from pathlib import Path
 from typing import Callable, Iterable
@@ -82,15 +83,14 @@ FEW_SHOT = [
 ]
 
 
-NOTE_MESSAGE = """CONTEXTO:
+NOTE_MESSAGE = """CONTEXTO (lo que se está hablando ahora en la reunión):
 {context}
 
-MODO NOTA: esta vez la frase la dijo el USUARIO (Yo), que está explicando el sistema: «{newest}»
-No escribas una respuesta para decir en voz alta. Escribe una NOTA para que el usuario la lea mientras \
-habla, que le sirva para explicar mejor: un dato exacto del CONOCIMIENTO relacionado (ruta de menú, \
-regla, tipo de comprobante, cuenta, impuesto), una advertencia, o algo que conviene mencionar a los \
-participantes. Máximo 2 oraciones. Escribe siempre la nota (aquí no existe NO_ACTION): si el \
-CONOCIMIENTO no tiene un dato exacto, da el consejo práctico más útil para explicar ese tema."""
+MODO COMENTARIO: lo último que se dijo fue «{newest}».
+No escribas una respuesta para decir en voz alta. Escribe un COMENTARIO para que el usuario lo lea \
+mientras sigue la conversación: el dato exacto del CONOCIMIENTO que más se relaciona con lo que se habla \
+(ruta de menú, regla, tipo de comprobante, cuenta, impuesto, a quién preguntar), una advertencia, o algo \
+que conviene mencionar. Máximo 2 oraciones. Escribe siempre el comentario (aquí no existe NO_ACTION).{avoid}"""
 
 SECTION_MESSAGE = """MODO PANTALLA: el usuario acaba de abrir en Odoo la pantalla «{title}» (ruta {path}).
 No es una pregunta. Escribe una NOTA para que el usuario la lea: para qué sirve esta pantalla y el dato, \
@@ -99,9 +99,10 @@ quién decide). Máximo 2 oraciones. Si el CONOCIMIENTO no dice nada útil sobre
 
 # Ejemplos del modo nota (fijos: forman parte del prefijo que LM Studio reutiliza).
 FEW_SHOT_NOTE = [
-    ("Ellos: ¿Y dónde veo lo que me deben los clientes?",
-     "Eso lo ven en el sistema, en la parte de clientes.",
-     "Ruta exacta: Ventas > Clientes > Estado de cuenta; ahí ven saldo y vencimientos por cliente."),
+    ("Ellos: Hay que revisar bien los datos del cliente antes de facturar.",
+     "Sí, sobre todo el número de identificación fiscal.",
+     "Dato útil: sin el identificador fiscal correcto el comprobante no sirve para crédito fiscal, "
+     "así que conviene validarlo al crear el contacto."),
     ("(ninguno)", "Cuando confirmen la factura ya queda registrada en contabilidad.",
      "Menciona que al confirmar se genera el asiento y el número fiscal, y que ya no se edita: "
      "si hay un error se corrige con una nota de crédito."),
@@ -110,11 +111,14 @@ FEW_SHOT_NOTE = [
      "y alimentan el reporte de compras."),
 ]
 
+UNVERIFIED_MARK = re.compile(r"\s*\(⚠ sin verificar:[^)]*\)")
+
 # Solo se piden notas cuando el usuario habla de estos temas (evita llamar al LLM por cada frase).
 # El modo nota no admite NO_ACTION: este filtro es quien decide cuándo comentar.
 NOTE_TOPICS = re.compile(
     r"factur|fatur|electr[oó]nic|e-?cf|contab|asiento|diario|ncf|comprobante|itbis|impuesto|retenc|isr|dgii|60[678]|nota de cr[eé]dito|"
     r"cuenta|pago|cobr|proveedor|cliente|banco|concilia|extracto|n[oó]mina|quincena|tss|afp|sfs|"
+    r"documento|secuencia|tercero|rnc|registr|valid|serie|"
     r"balance|estado de resultados|anal[ií]tic|plan de cuentas|t[eé]rmino|venc|anular|cancelar|borrar",
     re.IGNORECASE)
 
@@ -158,7 +162,8 @@ class LLMClient:
             messages.append({"role": "assistant", "content": ex_answer})
         if self.knowledge:
             for ex_context, ex_said, ex_note in FEW_SHOT_NOTE:
-                messages.append({"role": "user", "content": NOTE_MESSAGE.format(context=ex_context, newest=ex_said)})
+                example = NOTE_MESSAGE.format(context=f"{ex_context}\nYo: {ex_said}", newest=ex_said, avoid="")
+                messages.append({"role": "user", "content": example})
                 messages.append({"role": "assistant", "content": ex_note})
         messages.append({"role": "user", "content": user_message})
         stream = self.client.chat.completions.create(
@@ -187,16 +192,25 @@ class LLMClient:
             message += "\n\nLa FRASE NUEVA es una pregunta: responde siempre (aquí no uses NO_ACTION)."
         return self._complete(message, on_start, on_token)
 
-    def note(self, lines: list[tuple[str, str]], on_start: Callable[[], None],
+    def note(self, lines: list[tuple[str, str]], previous: str, on_start: Callable[[], None],
              on_token: Callable[[str], None]) -> str | None:
-        """Nota para que el usuario la lea, sobre lo último que dijo él mismo. Solo con conocimiento
-        cargado y cuando habla de temas que el conocimiento cubre."""
-        last_me = max((i for i, (speaker, _) in enumerate(lines) if speaker == ME), default=None)
-        if not self.knowledge or last_me is None or not NOTE_TOPICS.search(lines[last_me][1]):
+        """Comentario para que el usuario lo lea sobre lo que se está hablando (diga quien lo diga).
+        Solo con conocimiento cargado y cuando las últimas frases tocan temas que el conocimiento cubre."""
+        window = lines[-6:]
+        if not self.knowledge or not window or not any(NOTE_TOPICS.search(t) for _, t in window[-2:]):
             return None
-        context = "\n".join(f"{speaker}: {text}" for speaker, text in lines[:last_me]) or "(ninguno)"
-        message = NOTE_MESSAGE.format(context=context, newest=lines[last_me][1])
-        return self._complete(message, on_start, on_token)
+        context = "\n".join(f"{speaker}: {text}" for speaker, text in window)
+        previous = UNVERIFIED_MARK.sub("", previous).strip()
+        avoid = f"\nYa comentaste esto, di algo distinto: «{previous}»" if previous else ""
+        message = NOTE_MESSAGE.format(context=context, newest=window[-1][1], avoid=avoid)
+        # Se genera sin mostrar para poder descartar repeticiones (el 7B copia el comentario anterior).
+        held: list[str] = []
+        text = self._complete(message, lambda: None, held.append)
+        if not text or (previous and SequenceMatcher(None, UNVERIFIED_MARK.sub("", text), previous).ratio() > 0.7):
+            return None
+        on_start()
+        on_token(text)
+        return text
 
     def section(self, title: str, path: str, on_start: Callable[[], None],
                 on_token: Callable[[str], None]) -> str | None:
@@ -279,6 +293,9 @@ def unsupported_claim(answer: str, knowledge: str) -> str | None:
     for number in re.findall(r"(?<![\w.,])\d+(?:[.,]\d+)?(?:\s*%)?", ans):
         if not _number_supported(number.strip(), concepts, sentences):
             return f"«{number.strip()}»"
+    for code in re.findall(r"\b[be]\d{2}\b", ans):  # tipos de comprobante: B01, B04, E31…
+        if not re.search(rf"\b{code}\b", kb):
+            return f"«{code.upper()}»"
     for path in re.findall(r"[^.;:,()>]+(?:>[^.;:,()>]+)+", ans):
         steps = [step.strip(" «»\"'") for step in path.split(">")]
         if all(steps) and not _path_supported(steps, kb):
@@ -295,7 +312,7 @@ def filter_no_action(tokens: Iterable[str]) -> Iterable[str]:
             yield token
             continue
         held += token
-        probe = held.lstrip().strip("\"'`*")
+        probe = held.lstrip().strip("\"'`*").upper()  # el modelo a veces escribe "No_ACTION"
         if probe.startswith(NO_ACTION):
             return  # descartamos el resto
         if NO_ACTION.startswith(probe):

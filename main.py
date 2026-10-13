@@ -36,6 +36,8 @@ class LLMWorker(threading.Thread):
         self._last_call = 0.0
         self._questions: list[str] = []  # preguntas escritas: se responden siempre, sin contexto
         self._screen: tuple[str, str] | None = None  # pantalla de Odoo pendiente de comentar
+        self._last_note = ""
+        self._last_note_at = 0.0
         self.paused = False
         self.idle_status = lambda: "Escuchando"
 
@@ -82,12 +84,17 @@ class LLMWorker(threading.Thread):
                                               on_start=self.signals.suggestion_start.emit,
                                               on_token=self.signals.suggestion_token.emit)
                     print(f"[llm] → {result}" if result else "[llm] NO_ACTION")
+                answered = False
                 if "answer" in kinds:
                     result = self.llm.suggest(self.buffer.snapshot(), self._last_suggestion,
                                               on_start=self.signals.suggestion_start.emit,
                                               on_token=self.signals.suggestion_token.emit)
                     print(f"[llm] → {result}" if result else "[llm] NO_ACTION")
                     self._last_suggestion = result or self._last_suggestion
+                    answered = bool(result)
+                # Sin pregunta que responder, se comenta lo que se está hablando (como mucho cada 8 s).
+                if not answered and kinds and time.time() - self._last_note_at > 8:
+                    kinds.add("note")
                 if screen:
                     title, path = screen
                     note = self.llm.section(title, path,
@@ -95,12 +102,13 @@ class LLMWorker(threading.Thread):
                                             on_token=self.signals.note_token.emit)
                     if note:
                         print(f"[llm] 📍 {title}: {note}")
-                if "note" in kinds:
-                    note = self.llm.note(self.buffer.snapshot(),
+                if "note" in kinds and time.time() - self._last_note_at > 8:
+                    note = self.llm.note(self.buffer.snapshot(), self._last_note,
                                          on_start=lambda: self.signals.note_start.emit("📝 "),
                                          on_token=self.signals.note_token.emit)
                     if note:
                         print(f"[llm] 📝 {note}")
+                        self._last_note, self._last_note_at = note, time.time()
             except Exception as exc:  # LM Studio caído, modelo no cargado, etc.
                 print(f"[llm] Error: {exc}")
                 self.signals.status.emit("Error con LM Studio (ver terminal)")
