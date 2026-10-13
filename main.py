@@ -59,6 +59,8 @@ class LLMWorker(threading.Thread):
             if result:
                 print(f"[llm] → {result}")
                 self._last_suggestion = result
+            else:
+                print("[llm] NO_ACTION")
             self.signals.status.emit("Escuchando")
 
 
@@ -114,11 +116,11 @@ def main() -> int:
 
     def check_audio() -> None:
         nonlocal silence_warned
-        silent = capturer.seconds_of_digital_silence() > 15
+        silent = capturer.seconds_of_digital_silence() > 30
         if silent and not silence_warned:
-            print("[audio] 15 s de ceros absolutos. Si hay audio sonando, la app de terminal no tiene "
+            print("[audio] 30 s de ceros absolutos. Si hay audio sonando, la app de terminal no tiene "
                   "permiso de micrófono (Ajustes → Privacidad y seguridad → Micrófono).")
-            signals.status.emit("Sin audio: ¿suena algo? ¿permiso de micrófono?")
+            signals.status.emit("En silencio · si la llamada suena, revisa el permiso de micrófono")
         elif not silent and silence_warned:
             signals.status.emit(f"Escuchando · {capturer.device_name}")
         silence_warned = silent

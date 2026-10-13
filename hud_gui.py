@@ -1,4 +1,6 @@
 """HUD flotante: siempre visible, semitransparente, sin bordes y arrastrable."""
+import sys
+
 from PyQt6.QtCore import QObject, Qt, QPoint, pyqtSignal
 from PyQt6.QtGui import QFont, QGuiApplication
 from PyQt6.QtWidgets import QLabel, QVBoxLayout, QWidget
@@ -72,6 +74,11 @@ class HudWindow(QWidget):
 
         self._place_top_right()
 
+    def showEvent(self, event):
+        super().showEvent(event)
+        if sys.platform == "darwin":
+            _float_over_fullscreen(self)
+
     def _place_top_right(self) -> None:
         screen = QGuiApplication.primaryScreen().availableGeometry()
         self.adjustSize()
@@ -99,3 +106,36 @@ class HudWindow(QWidget):
 
     def mouseDoubleClickEvent(self, event):
         self.close()
+
+
+def _float_over_fullscreen(widget: QWidget) -> None:
+    """Qt no expone esto: sin ello el HUD se queda en el escritorio y no aparece sobre
+    Zoom/Meet en pantalla completa, y como ventana Tool se oculta cuando la app pierde el foco."""
+    try:
+        import objc
+        from AppKit import (
+            NSApp,
+            NSApplicationActivationPolicyAccessory,
+            NSStatusWindowLevel,
+            NSWindowStyleMaskNonactivatingPanel,
+            NSWindowCollectionBehaviorCanJoinAllSpaces,
+            NSWindowCollectionBehaviorFullScreenAuxiliary,
+            NSWindowCollectionBehaviorStationary,
+        )
+    except ImportError:
+        print("[hud] Instala pyobjc-framework-Cocoa para ver el HUD sobre apps en pantalla completa.")
+        return
+    # Solo una app "accesorio" (sin icono en el Dock) puede mostrar ventanas sobre el Space
+    # en pantalla completa de otra app.
+    NSApp.setActivationPolicy_(NSApplicationActivationPolicyAccessory)
+    view = objc.objc_object(c_void_p=int(widget.winId()))
+    window = view.window()
+    window.setStyleMask_(window.styleMask() | NSWindowStyleMaskNonactivatingPanel)
+    window.setCollectionBehavior_(
+        NSWindowCollectionBehaviorCanJoinAllSpaces
+        | NSWindowCollectionBehaviorFullScreenAuxiliary
+        | NSWindowCollectionBehaviorStationary
+    )
+    window.setLevel_(NSStatusWindowLevel)
+    window.setHidesOnDeactivate_(False)
+    window.orderFrontRegardless()  # lanzado desde la terminal, la app nunca se "activa"

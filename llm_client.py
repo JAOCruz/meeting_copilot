@@ -8,28 +8,36 @@ from config import Config
 NO_ACTION = "NO_ACTION"
 
 SYSTEM_PROMPT = f"""Eres un copiloto silencioso que asiste al usuario durante una reunión en vivo.
-Recibirás la transcripción reciente de lo que dicen los OTROS participantes (el usuario no aparece en ella).
+Recibirás lo que dicen los OTROS participantes (el usuario no aparece): un CONTEXTO previo y la FRASE NUEVA.
 
-Reglas:
-1. Analiza el búfer de transcripción, dando prioridad a las últimas líneas.
-2. ACTÚA si en las últimas líneas hay: una pregunta de trabajo (plazos, cómo se hará algo, opinión, \
-estado, costos, decisiones), una petición, o una objeción. Toda pregunta de trabajo cuenta como dirigida \
-al usuario. Escribe la RESPUESTA que el usuario diría en voz alta: afirmativa, profesional, directa y \
-ultra-concisa (máximo 2 oraciones). Si faltan datos, propón una respuesta razonable o un compromiso concreto; \
-nunca respondas con otra pregunta. Usa el idioma de la conversación. Sin preámbulos, comillas ni explicaciones.
-3. Responde ÚNICAMENTE {NO_ACTION} si es charla trivial (clima, saludos, bromas), logística sin pregunta, \
-o si la pregunta ya fue respondida en la transcripción.
-4. No repitas una sugerencia que ya diste.
+Decide SOLO sobre la FRASE NUEVA (el contexto sirve para entenderla, no para decidir):
+- Si la FRASE NUEVA es una pregunta de trabajo (plazos, cómo se hará algo, opinión, estado, costos, \
+decisiones), una petición o una objeción: escribe la RESPUESTA que el usuario diría en voz alta. \
+Afirmativa, profesional, directa, máximo 2 oraciones. Si faltan datos, propón una respuesta razonable \
+o un compromiso concreto; nunca respondas con otra pregunta. Usa el idioma de la frase. \
+Sin preámbulos, comillas ni explicaciones. Los nombres pueden venir mal transcritos; asume que van dirigidos al usuario.
+- Si la FRASE NUEVA es charla trivial (clima, saludos, bromas) o no pide nada: responde ÚNICAMENTE {NO_ACTION}
+- Si la FRASE NUEVA repite algo que ya respondiste (ver "Ya sugeriste"): responde {NO_ACTION}"""
 
-Ejemplos:
-Transcripción: - ¿Cuándo podrías enviarnos la propuesta con los costos?
-Respuesta: Se la envío mañana antes del mediodía, con el desglose por fase.
+# Ejemplos como turnos de chat: los modelos de 7B los imitan mucho mejor que si van dentro del prompt.
+FEW_SHOT = [
+    ("(ninguno)", "¿Cuándo podrías enviarnos la propuesta con los costos?",
+     "Se la envío mañana antes del mediodía, con el desglose por fase."),
+    ("- Buenos días a todos.\n- Qué frío hace en esta oficina.",
+     "Oye, ¿cómo vas a manejar los reintentos si falla un pago?",
+     "Usaremos reintentos con backoff exponencial y claves de idempotencia para evitar cobros dobles."),
+    ("- ¿Cuál es el estado del módulo de reportes?", "Sí, y el tráfico hoy estaba horrible.", NO_ACTION),
+    ("(ninguno)", "Creo que el cronograma es demasiado agresivo.",
+     "Entiendo; podemos priorizar lo crítico para la primera entrega y mover el resto a una segunda fase."),
+    ("(ninguno)", "Hola, ¿me escuchan bien?", NO_ACTION),
+]
 
-Transcripción: - ¿Cómo vas a manejar los reintentos si falla el pago?
-Respuesta: Usaremos reintentos con backoff exponencial y claves de idempotencia para evitar cobros dobles.
 
-Transcripción: - Qué calor hace hoy. - Sí, y el tráfico estaba horrible.
-Respuesta: {NO_ACTION}"""
+def build_user_message(context: str, newest: str, previous: str = "") -> str:
+    msg = f"CONTEXTO:\n{context}\n\nFRASE NUEVA: {newest}"
+    if previous:
+        msg += f"\n\nYa sugeriste: {previous}"
+    return msg
 
 
 class LLMClient:
@@ -45,15 +53,17 @@ class LLMClient:
                   "usa COPILOT_LLM_MODEL con uno de los anteriores.")
 
     def _stream(self, transcript: str, previous: str) -> Iterable[str]:
-        user_msg = f"Transcripción reciente:\n{transcript}"
-        if previous:
-            user_msg += f"\n\nÚltima sugerencia que ya mostraste: {previous}"
+        lines = transcript.splitlines()
+        context = "\n".join(lines[:-1]) or "(ninguno)"
+        newest = lines[-1].removeprefix("- ") if lines else ""
+        messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+        for ex_context, ex_newest, ex_answer in FEW_SHOT:
+            messages.append({"role": "user", "content": build_user_message(ex_context, ex_newest)})
+            messages.append({"role": "assistant", "content": ex_answer})
+        messages.append({"role": "user", "content": build_user_message(context, newest, previous)})
         stream = self.client.chat.completions.create(
             model=self.cfg.llm_model,
-            messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": user_msg},
-            ],
+            messages=messages,
             temperature=self.cfg.llm_temperature,
             max_tokens=self.cfg.llm_max_tokens,
             stream=True,

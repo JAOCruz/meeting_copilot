@@ -69,6 +69,7 @@ COPILOT_SILENCE_RMS=0.004 python main.py   # si el audio entra bajo y no detecta
 ```
 
 En el HUD: **arrastra** para moverlo, **doble clic** para cerrarlo. `Ctrl+C` en la terminal también lo cierra.
+El HUD aparece en todos los escritorios y encima de apps en pantalla completa (Zoom, Meet, Teams).
 
 Antes de una llamada real, prueba poniendo un video de YouTube con alguien haciendo preguntas
 y la salida en el dispositivo múltiple.
@@ -86,10 +87,10 @@ y la salida en el dispositivo múltiple.
 macOS trata cualquier entrada de audio (incluida BlackHole) como micrófono. Si la app de terminal
 desde la que ejecutas el copiloto no tiene ese permiso, recibe **silencio absoluto sin dar ningún error**.
 
-1. Ajustes del Sistema → **Privacidad y seguridad → Micrófono** → activa tu terminal
-   (Terminal, iTerm, Hyper, VS Code…) y reiníciala.
-2. Si tu terminal no aparece en la lista (pasa con algunas apps como Hyper, que nunca piden el permiso),
-   ejecuta el copiloto desde **Terminal.app**: la primera vez mostrará el aviso de permiso.
+1. Ajustes del Sistema → **Privacidad y seguridad → Micrófono** (no "Cámara" ni "Grabación de pantalla")
+   → activa tu terminal (Terminal, iTerm, Hyper, VS Code…).
+2. Cierra la terminal por completo (Cmd+Q) y vuelve a abrirla: el permiso solo aplica a procesos nuevos.
+3. Si tu terminal no aparece en la lista, ejecuta el copiloto desde **Terminal.app**, que sí muestra el aviso.
 
 Prueba rápida: `python -c "import sounddevice as sd, numpy as np; r=sd.rec(48000*2, 48000, 1); sd.wait(); print(np.abs(r).max())"`
 mientras hablas. Si imprime `0.0`, el problema es el permiso.
