@@ -220,6 +220,9 @@ def main() -> int:
 
     controls = Controls(app)
     hud = HudWindow(cfg, signals, controls)
+    for speaker, text in hud.transcript_lines()[-cfg.buffer_max_sentences:]:
+        if speaker in (THEM, ME):
+            buffer.add(speaker, text)  # el LLM recupera el contexto de la sesión guardada
     tray = create_tray(controls, app)
 
     def status_text() -> str:

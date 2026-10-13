@@ -8,6 +8,7 @@ from PyQt6.QtGui import QAction, QColor, QFont, QGuiApplication, QIcon, QPainter
 from PyQt6.QtWidgets import (QHBoxLayout, QLabel, QLineEdit, QMenu, QSizeGrip, QSystemTrayIcon,
                              QTextBrowser, QToolButton, QVBoxLayout, QWidget)
 
+import session_store
 from config import Config
 
 SPEAKER_COLORS = {"Yo": "#8ab4f8", "Ellos": "#e0e3e7"}
@@ -104,8 +105,9 @@ class HudWindow(QWidget):
             "QScrollBar:vertical { width: 6px; background: transparent; }"
             "QScrollBar::handle:vertical { background: rgba(255,255,255,60); border-radius: 3px; }"
             "QScrollBar::add-line, QScrollBar::sub-line { height: 0; }")
-        self._entries: list[list[str]] = []  # [tipo, prefijo, texto]
+        self._entries: list[list[str]] = session_store.load()  # [tipo, prefijo, texto]; sobrevive reinicios
         self._suggestion_font = cfg.hud_font_size
+        QTimer.singleShot(0, self._render)  # muestra la sesión recuperada
 
         self.ask_input = QLineEdit()
         self.ask_input.setPlaceholderText("Pregunta rápida… (Enter)")
@@ -156,6 +158,7 @@ class HudWindow(QWidget):
         self.move(screen.right() - self.width() - 24, screen.top() + 24)
 
     def clear(self) -> None:
+        session_store.archive()  # la sesión anterior queda guardada en sessions/<fecha>.json
         self._entries.clear()
         self._render()
 
@@ -165,21 +168,27 @@ class HudWindow(QWidget):
             self.ask_input.clear()
             self._signals.ask.emit(text)
 
+    def transcript_lines(self) -> list[tuple[str, str]]:
+        """Frases guardadas de la sesión, para devolverle el contexto al LLM tras un reinicio."""
+        return [(prefix, text) for kind, prefix, text in self._entries if kind == "line"]
+
     def _on_transcript(self, speaker: str, text: str) -> None:
         self._add("line", speaker, text)
 
     def _add(self, kind: str, prefix: str, text: str) -> None:
         self._entries.append([kind, prefix, text])
         self._render()
+        session_store.save(self._entries)
 
     def _append_token(self, token: str) -> None:
         if self._entries:
             self._entries[-1][2] += token
             self._render()
+            session_store.save(self._entries)
 
     def _render(self) -> None:
         bar = self.feed.verticalScrollBar()
-        at_bottom = bar.value() >= bar.maximum() - 4
+        position = bar.value()  # sin scroll automático: el historial se queda donde el usuario lo dejó
         parts = []
         for kind, prefix, text in self._entries:
             body = html.escape(text)
@@ -193,8 +202,7 @@ class HudWindow(QWidget):
             else:
                 parts.append(f"<p style='margin:6px 0; color:#8ab4f8; font-size:13px'>{html.escape(prefix)}{body}</p>")
         self.feed.setHtml("".join(parts) or "<p style='color:#5f6368'>Esperando…</p>")
-        if at_bottom:
-            bar.setValue(bar.maximum())
+        bar.setValue(position)
 
     # --- arrastrar ---
     def mousePressEvent(self, event):
