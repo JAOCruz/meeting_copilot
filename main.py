@@ -110,6 +110,23 @@ def main() -> int:
     capturer.start()
     signals.status.emit(f"Escuchando · {capturer.device_name}")
 
+    silence_warned = False
+
+    def check_audio() -> None:
+        nonlocal silence_warned
+        silent = capturer.seconds_of_digital_silence() > 15
+        if silent and not silence_warned:
+            print("[audio] 15 s de ceros absolutos. Si hay audio sonando, la app de terminal no tiene "
+                  "permiso de micrófono (Ajustes → Privacidad y seguridad → Micrófono).")
+            signals.status.emit("Sin audio: ¿suena algo? ¿permiso de micrófono?")
+        elif not silent and silence_warned:
+            signals.status.emit(f"Escuchando · {capturer.device_name}")
+        silence_warned = silent
+
+    audio_timer = QTimer()
+    audio_timer.timeout.connect(check_audio)
+    audio_timer.start(2000)
+
     # Ctrl+C en la terminal: Qt necesita un timer para que Python procese la señal
     signal.signal(signal.SIGINT, lambda *_: app.quit())
     timer = QTimer()

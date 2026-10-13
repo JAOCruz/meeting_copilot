@@ -52,7 +52,10 @@ class HudWindow(QWidget):
 
         self.suggestion_label = QLabel("Esperando una pregunta…")
         self.suggestion_label.setWordWrap(True)
-        self.suggestion_label.setFont(QFont("SF Pro Text", cfg.hud_font_size, QFont.Weight.DemiBold))
+        font = QFont()  # fuente del sistema (San Francisco en macOS)
+        font.setPointSize(cfg.hud_font_size)
+        font.setWeight(QFont.Weight.DemiBold)
+        self.suggestion_label.setFont(font)
         self.suggestion_label.setStyleSheet("color: #7CFFB2;")
         self.suggestion_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
 

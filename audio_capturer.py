@@ -1,5 +1,6 @@
 """Captura de audio desde BlackHole (u otro dispositivo) y conversión a 16 kHz mono float32."""
 import queue
+import time
 
 import numpy as np
 import sounddevice as sd
@@ -48,11 +49,15 @@ class AudioCapturer:
         self.blocksize = int(self.src_rate * block_seconds)
         self.queue: "queue.Queue[np.ndarray]" = queue.Queue(maxsize=600)
         self._stream: sd.InputStream | None = None
+        self.started_at = 0.0
+        self.last_signal_at = 0.0  # último bloque que no fue silencio digital absoluto
 
     def _callback(self, indata, frames, time_info, status):
         if status:
             print(f"[audio] {status}")
         mono = indata.mean(axis=1) if indata.ndim > 1 else indata
+        if np.any(mono):
+            self.last_signal_at = time.time()
         chunk = resample(mono.astype(np.float32), self.src_rate, self.target_rate)
         try:
             self.queue.put_nowait(chunk)
@@ -69,7 +74,14 @@ class AudioCapturer:
             callback=self._callback,
         )
         self._stream.start()
+        self.started_at = time.time()
         print(f"[audio] Capturando de '{self.device_name}' a {self.src_rate} Hz → {self.target_rate} Hz")
+
+    def seconds_of_digital_silence(self) -> float:
+        """Segundos seguidos recibiendo ceros exactos (sin permiso de micrófono o nada sonando)."""
+        if not self.started_at:
+            return 0.0
+        return time.time() - max(self.last_signal_at, self.started_at)
 
     def stop(self) -> None:
         if self._stream is not None:

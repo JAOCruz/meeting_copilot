@@ -79,3 +79,17 @@ y la salida en el dispositivo múltiple.
   el modelo `small` transcribe una frase en ~0.5–1.5 s en un M3. Si va atrasado, usa `base`.
 - **Frases cortadas o pegadas**: ajusta `silence_duration` y `max_segment_seconds` en `config.py`.
 - **Demasiadas/pocas sugerencias**: edita `SYSTEM_PROMPT` en `llm_client.py`.
+
+## Problemas comunes
+
+**El HUD dice "Sin audio" o no transcribe nada aunque suena la llamada.**
+macOS trata cualquier entrada de audio (incluida BlackHole) como micrófono. Si la app de terminal
+desde la que ejecutas el copiloto no tiene ese permiso, recibe **silencio absoluto sin dar ningún error**.
+
+1. Ajustes del Sistema → **Privacidad y seguridad → Micrófono** → activa tu terminal
+   (Terminal, iTerm, Hyper, VS Code…) y reiníciala.
+2. Si tu terminal no aparece en la lista (pasa con algunas apps como Hyper, que nunca piden el permiso),
+   ejecuta el copiloto desde **Terminal.app**: la primera vez mostrará el aviso de permiso.
+
+Prueba rápida: `python -c "import sounddevice as sd, numpy as np; r=sd.rec(48000*2, 48000, 1); sd.wait(); print(np.abs(r).max())"`
+mientras hablas. Si imprime `0.0`, el problema es el permiso.
