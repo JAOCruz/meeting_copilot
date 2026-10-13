@@ -16,6 +16,7 @@ class Config:
     audio_device: str = field(default_factory=lambda: _env("COPILOT_AUDIO_DEVICE", "BlackHole"))
     mic_device: str = field(default_factory=lambda: _env("COPILOT_MIC_DEVICE", ""))  # "" = entrada por defecto
     mic_enabled_at_start: bool = True
+    auto_route: bool = True                   # crear/activar "Copilot (salida + BlackHole)" al escuchar la llamada
     target_sample_rate: int = 16_000          # Whisper trabaja a 16 kHz mono
 
     # --- Segmentación (VAD por energía) ---
@@ -38,6 +39,11 @@ class Config:
     llm_temperature: float = 0.2
     llm_max_tokens: int = 120
     llm_cooldown_seconds: float = 2.0         # mínimo entre llamadas al LLM
+    answers_enabled: bool = True              # 💬 respuestas a preguntas de los demás
+    notes_enabled: bool = True                # 📝 comentarios sobre lo que se habla
+    screen_notes_enabled: bool = True         # 📍 notas sobre la pantalla de Odoo abierta en Chrome
+    note_interval_seconds: float = 8.0        # mínimo entre comentarios 📝
+    knowledge_project: str = "transport"      # proyecto de aiviber que exporta "Actualizar desde aiviber"
     # Conocimiento del proyecto (.md/.txt) que se incluye en el prompt; ver tools/export_epona_context.py
     context_path: str = field(default_factory=lambda: _env("COPILOT_CONTEXT", "knowledge"))
     context_max_chars: int = 90_000           # ~22k tokens; el modelo tiene 32k cargados

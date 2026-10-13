@@ -1,5 +1,6 @@
 """Meeting Copilot: llamada (BlackHole) + tu mic → Whisper → LM Studio → HUD."""
 import argparse
+import os
 import queue
 import signal
 import sys
@@ -13,7 +14,9 @@ from PyQt6.QtWidgets import QApplication
 from audio_capturer import AudioCapturer, list_input_devices
 from audio_route import set_route
 from config import Config
-from hud_gui import Controls, HudSignals, HudWindow, create_tray, make_accessory_app
+import settings_store
+from hud_gui import Controls, HudSignals, HudWindow, bring_to_front, create_tray, make_accessory_app
+from settings_dialog import SettingsDialog
 from llm_client import LLMClient
 from screen_context import active_odoo_screen, section_key
 from transcriber import ME, THEM, Segmenter, TranscriptBuffer, Transcriber
@@ -85,24 +88,25 @@ class LLMWorker(threading.Thread):
                                               on_token=self.signals.suggestion_token.emit)
                     print(f"[llm] → {result}" if result else "[llm] NO_ACTION")
                 answered = False
-                if "answer" in kinds:
+                if "answer" in kinds and self.cfg.answers_enabled:
                     result = self.llm.suggest(self.buffer.snapshot(), self._last_suggestion,
                                               on_start=self.signals.suggestion_start.emit,
                                               on_token=self.signals.suggestion_token.emit)
                     print(f"[llm] → {result}" if result else "[llm] NO_ACTION")
                     self._last_suggestion = result or self._last_suggestion
                     answered = bool(result)
-                # Sin pregunta que responder, se comenta lo que se está hablando (como mucho cada 8 s).
-                if not answered and kinds and time.time() - self._last_note_at > 8:
+                # Sin pregunta que responder, se comenta lo que se está hablando (con el intervalo configurado).
+                if not answered and kinds and time.time() - self._last_note_at > self.cfg.note_interval_seconds:
                     kinds.add("note")
-                if screen:
+                if screen and self.cfg.screen_notes_enabled:
                     title, path = screen
                     note = self.llm.section(title, path,
                                             on_start=lambda: self.signals.note_start.emit(f"📍 {title}: "),
                                             on_token=self.signals.note_token.emit)
                     if note:
                         print(f"[llm] 📍 {title}: {note}")
-                if "note" in kinds and time.time() - self._last_note_at > 8:
+                if ("note" in kinds and self.cfg.notes_enabled
+                        and time.time() - self._last_note_at > self.cfg.note_interval_seconds):
                     note = self.llm.note(self.buffer.snapshot(), self._last_note,
                                          on_start=lambda: self.signals.note_start.emit("📝 "),
                                          on_token=self.signals.note_token.emit)
@@ -162,6 +166,9 @@ def main() -> int:
         return 0
 
     cfg = Config()
+    settings_store.apply(cfg)  # lo elegido en la ventana de Configuración (settings.json)
+    if args.no_route:
+        cfg.auto_route = False
     if args.device:
         cfg.audio_device = args.device
     if args.mic is not None:
@@ -233,7 +240,7 @@ def main() -> int:
         return f"Escuchando {' + '.join(sources)}{suffix}"
 
     def toggle_call(on: bool) -> None:
-        if not args.no_route:
+        if cfg.auto_route:
             print(f"[audio] {set_route(on)}")
         call.start() if on else call.stop()
         signals.status.emit(status_text())
@@ -256,10 +263,44 @@ def main() -> int:
     controls.copilot.toggled.connect(toggle_copilot)
     controls.screen.toggled.connect(lambda on: setattr(screen_watcher, "enabled", on))
     controls.clear.triggered.connect(buffer.clear)
+
+    restart_requested = False
+    settings_window: SettingsDialog | None = None
+
+    def apply_settings(changed: set, restart: bool) -> None:
+        nonlocal restart_requested
+        print(f"[config] Guardado: {', '.join(sorted(changed)) or 'sin cambios'}")
+        if restart:
+            restart_requested = True
+            app.quit()
+            return
+        hud.apply_appearance(cfg)
+        controls.screen.setChecked(cfg.screen_notes_enabled)
+        if changed & {"llm_base_url", "context_path", "context_max_chars", "llm_model"}:
+            def reload_llm() -> None:
+                try:
+                    llm.reload()
+                    llm.warm_up()
+                    signals.status.emit(f"Configuración aplicada · {status_text()}")
+                except Exception as exc:
+                    print(f"[llm] Error al aplicar la configuración: {exc}")
+                    signals.status.emit("Error con LM Studio tras el cambio (ver terminal)")
+            signals.status.emit("Aplicando configuración…")
+            threading.Thread(target=reload_llm, daemon=True).start()
+
+    def open_settings() -> None:
+        nonlocal settings_window
+        if settings_window is None or not settings_window.isVisible():
+            settings_window = SettingsDialog(cfg, llm, on_new_session=controls.clear.trigger)
+            settings_window.saved.connect(apply_settings)
+        bring_to_front(settings_window)
+
+    controls.settings.triggered.connect(open_settings)
     controls.quit.triggered.connect(app.quit)
     signals.ask.connect(ask)
 
-    # inbox.txt: cada línea nueva es una pregunta (para mandarlas desde otra herramienta o un script).
+    # inbox.txt: cada línea nueva es una pregunta (para mandarlas desde otra herramienta o un script);
+    # "/config" abre la ventana de Configuración.
     inbox = Path(__file__).parent / "inbox.txt"
     inbox_seen = len(inbox.read_text(encoding="utf-8").splitlines()) if inbox.exists() else 0
 
@@ -269,7 +310,9 @@ def main() -> int:
             return
         lines = inbox.read_text(encoding="utf-8").splitlines()
         for line in lines[inbox_seen:]:
-            if line.strip():
+            if line.strip() == "/config":
+                controls.settings.trigger()
+            elif line.strip():
                 ask(line.strip())
         inbox_seen = len(lines)
 
@@ -282,6 +325,7 @@ def main() -> int:
     if controls.mic.isChecked():
         mic.start()
     hud.show()
+    controls.screen.setChecked(cfg.screen_notes_enabled)
     signals.status.emit(status_text())
 
     silence_warned = False
@@ -313,10 +357,13 @@ def main() -> int:
     call.stop()
     if mic:
         mic.stop()
-    if not args.no_route:
+    if cfg.auto_route:
         print(f"[audio] {set_route(False)}")  # devuelve la salida normal (y las teclas de volumen)
     for worker in workers:
         worker.stop()
+    if restart_requested:
+        print("[config] Reiniciando para aplicar los cambios…")
+        os.execv(sys.executable, [sys.executable, *sys.argv])
     return code
 
 

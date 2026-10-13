@@ -34,18 +34,21 @@ class Controls(QObject):
         self.mic = self._toggle("🎙 Mi mic", "Escuchar tu micrófono (aparece como 'Yo')")
         self.copilot = self._toggle("✨ Copiloto", "Generar sugerencias con el LLM")
         self.screen = self._toggle("📍 Pantalla", "Notas sobre la pantalla de Odoo abierta en Chrome")
-        self.clear = QAction("🧹", self, toolTip="Borrar transcripción y sugerencia")
+        self.clear = QAction("🧹", self, toolTip="Archivar la sesión y empezar una nueva")
+        self.settings = QAction("⚙", self, toolTip="Configuración")
         self.toggle_hud = QAction("Mostrar/ocultar HUD", self)
         self.hide_hud = QAction("✕", self, toolTip="Ocultar (vuelve desde el icono verde de la barra de menú)")
         self.quit = QAction("Salir del copiloto", self)
 
     def _toggle(self, text: str, tip: str) -> QAction:
-        return QAction(text, self, checkable=True, checked=True, toolTip=tip)
+        action = QAction(text, self, checkable=True, checked=True, toolTip=f"{text[2:]}: {tip}")
+        action.setIconText(text.split()[0])  # en el HUD solo el ícono (el verde indica encendido); en el menú, el nombre
+        return action
 
 
 TOGGLE_STYLE = """
 QToolButton { color: #c8ccd2; background: rgba(255,255,255,18); border: 1px solid rgba(255,255,255,30);
-              border-radius: 8px; padding: 3px 8px; font-size: 12px; }
+              border-radius: 8px; padding: 3px 10px; font-size: 14px; }
 QToolButton:checked { color: #0d1f16; background: #7CFFB2; border-color: #7CFFB2; }
 QToolButton:hover { border-color: rgba(255,255,255,90); }
 """
@@ -90,7 +93,7 @@ class HudWindow(QWidget):
         for action in (controls.call, controls.mic, controls.copilot, controls.screen):
             toolbar.addWidget(self._button(action, TOGGLE_STYLE))
         toolbar.addStretch()
-        for action in (controls.clear, controls.hide_hud):
+        for action in (controls.settings, controls.clear, controls.hide_hud):
             toolbar.addWidget(self._button(action, PLAIN_STYLE))
 
         self.status_label = QLabel("● Iniciando…")
@@ -173,6 +176,13 @@ class HudWindow(QWidget):
             self.ask_input.clear()
             self._signals.ask.emit(text)
 
+    def apply_appearance(self, cfg: Config) -> None:
+        """Aplica en vivo los ajustes visuales de la ventana de Configuración."""
+        self.setWindowOpacity(cfg.hud_opacity)
+        self._suggestion_font = cfg.hud_font_size
+        self.resize(cfg.hud_width, self.height())
+        self._render()
+
     def _on_user_scroll(self, value: int) -> None:
         if not self._rendering:  # solo cuentan los movimientos del usuario, no los del redibujado
             self._follow = value >= self.feed.verticalScrollBar().maximum() - 4
@@ -250,7 +260,8 @@ def create_tray(controls: Controls, parent: QObject) -> QSystemTrayIcon:
     for action in (controls.call, controls.mic, controls.copilot, controls.screen):
         menu.addAction(action)
     menu.addSeparator()
-    menu.addAction("Borrar transcripción", controls.clear.trigger)
+    menu.addAction("Configuración…", controls.settings.trigger)
+    menu.addAction("Nueva sesión (archivar la actual)", controls.clear.trigger)
     menu.addAction("Salir", controls.quit.trigger)
 
     tray = QSystemTrayIcon(QIcon(pixmap), parent)
@@ -259,6 +270,26 @@ def create_tray(controls: Controls, parent: QObject) -> QSystemTrayIcon:
     tray.show()
     tray.menu_ref = menu  # el menú no tiene padre: evita que Python lo recolecte
     return tray
+
+
+def bring_to_front(widget: QWidget) -> None:
+    """Muestra una ventana normal (p. ej. Configuración) al frente y con foco de teclado, incluso sobre una
+    app en pantalla completa: la app es "accesorio" y por sí sola no se activa."""
+    widget.show()
+    if sys.platform == "darwin":
+        try:
+            import objc
+            from AppKit import (NSApp, NSFloatingWindowLevel, NSWindowCollectionBehaviorFullScreenAuxiliary,
+                                NSWindowCollectionBehaviorMoveToActiveSpace)
+            window = objc.objc_object(c_void_p=int(widget.winId())).window()
+            window.setCollectionBehavior_(NSWindowCollectionBehaviorMoveToActiveSpace
+                                          | NSWindowCollectionBehaviorFullScreenAuxiliary)
+            window.setLevel_(NSFloatingWindowLevel)
+            NSApp.activateIgnoringOtherApps_(True)
+        except ImportError:
+            pass
+    widget.raise_()
+    widget.activateWindow()
 
 
 def make_accessory_app() -> None:

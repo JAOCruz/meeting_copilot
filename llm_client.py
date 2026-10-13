@@ -133,6 +133,11 @@ def build_user_message(context: str, newest: str, previous: str = "") -> str:
 class LLMClient:
     def __init__(self, cfg: Config):
         self.cfg = cfg
+        self.reload()
+
+    def reload(self) -> None:
+        """(Re)lee el conocimiento y la URL del servidor desde `cfg`; lo usa la ventana de Configuración."""
+        cfg = self.cfg
         self.client = OpenAI(base_url=cfg.llm_base_url, api_key="lm-studio")
         knowledge = load_knowledge(cfg.context_path, cfg.context_max_chars)
         self.knowledge = knowledge
@@ -142,11 +147,14 @@ class LLMClient:
             self.system_prompt = (SYSTEM_PROMPT.format(missing_data_rule=MISSING_DATA_KNOWLEDGE)
                                   + KNOWLEDGE_HEADER + knowledge + KNOWLEDGE_FOOTER)
             self.few_shot = FEW_SHOT + FEW_SHOT_KNOWLEDGE
+            print(f"[llm] Conocimiento cargado: {len(knowledge):,} caracteres (~{len(knowledge) // 4:,} tokens)")
         else:
             self.system_prompt = SYSTEM_PROMPT.format(missing_data_rule=MISSING_DATA_GENERIC)
             self.few_shot = FEW_SHOT
-        if knowledge:
-            print(f"[llm] Conocimiento cargado: {len(knowledge):,} caracteres (~{len(knowledge) // 4:,} tokens)")
+
+    def available_models(self) -> list[str]:
+        """Modelos de chat que ofrece LM Studio (los de embeddings no sirven aquí)."""
+        return [m.id for m in self.client.models.list().data if "embed" not in m.id.lower()]
 
     def check_connection(self) -> None:
         models = [m.id for m in self.client.models.list().data]
@@ -173,9 +181,9 @@ class LLMClient:
             max_tokens=self.cfg.llm_max_tokens,
             stream=True,
         )
-        for chunk in stream:
-            if chunk.choices and chunk.choices[0].delta.content:
-                yield chunk.choices[0].delta.content
+        yield from strip_thinking(
+            chunk.choices[0].delta.content for chunk in stream
+            if chunk.choices and chunk.choices[0].delta.content)
 
     def suggest(self, lines: list[tuple[str, str]], previous: str, on_start: Callable[[], None],
                 on_token: Callable[[str], None]) -> str | None:
@@ -301,6 +309,32 @@ def unsupported_claim(answer: str, knowledge: str) -> str | None:
         if all(steps) and not _path_supported(steps, kb):
             return f"«{' > '.join(steps[-2:])}»"
     return None
+
+
+def strip_thinking(tokens: Iterable[str]) -> Iterable[str]:
+    """Quita el bloque <think>…</think> de los modelos con razonamiento (Qwen3, DeepSeek-R1…)."""
+    buffer = ""
+    thinking = None  # None = aún no se sabe si la respuesta empieza pensando
+    for token in tokens:
+        if thinking is False:
+            yield token
+            continue
+        buffer += token
+        if thinking is None:
+            stripped = buffer.lstrip()
+            if stripped.startswith("<think>"):
+                thinking = True
+            elif "<think>".startswith(stripped):
+                continue
+            else:
+                thinking = False
+                yield buffer
+                continue
+        if thinking and "</think>" in buffer:
+            thinking = False
+            rest = buffer.split("</think>", 1)[1].lstrip()
+            if rest:
+                yield rest
 
 
 def filter_no_action(tokens: Iterable[str]) -> Iterable[str]:

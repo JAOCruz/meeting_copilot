@@ -73,18 +73,45 @@ COPILOT_SILENCE_RMS=0.004 python main.py   # si el audio entra bajo y no detecta
 
 ### Controles
 
-En el HUD (arrástralo para moverlo) y en el icono verde de la barra de menú:
+En el HUD (arrástralo para moverlo; la esquina inferior derecha lo agranda) y en el icono verde de la
+barra de menú. En el HUD los interruptores muestran solo el ícono: **verde = encendido** (el nombre
+aparece al pasar el ratón).
 
 | Botón | Qué hace |
 |---|---|
 | 🎧 Llamada | Escucha la llamada. Activa/desactiva también la ruta de audio por BlackHole. |
-| 🎙 Mi mic | Escucha tu micrófono (aparece como **Yo**; da contexto, no dispara sugerencias). Al apagarlo se apaga el indicador naranja de macOS. |
-| ✨ Copiloto | Pausa/reanuda las sugerencias del LLM (la transcripción sigue). |
-| 🧹 | Borra la transcripción y la sugerencia. |
-| — | Oculta el HUD; vuelve desde el icono de la barra de menú. |
-| ✕ | Sale y restaura tu salida de audio. |
+| 🎙 Mi mic | Escucha tu micrófono (aparece como **Yo**). Al apagarlo se apaga el indicador naranja de macOS. |
+| ✨ Copiloto | Pausa/reanuda la IA (la transcripción sigue). |
+| 📍 Pantalla | Notas sobre la pantalla de Odoo abierta en Chrome. |
+| ⚙ | Ventana de **Configuración**. |
+| 🧹 | Archiva la sesión (`sessions/<fecha>.json`) y empieza una nueva. |
+| ✕ | Oculta el HUD; vuelve desde el icono de la barra de menú. Para salir: menú → «Salir del copiloto». |
 
-Opciones de arranque: `--no-mic`, `--mic "AirPods"`, `--no-route` (si ya tienes tu propio dispositivo múltiple).
+El historial (frases, 💬 respuestas, 📝/📍 notas) se guarda en `sessions/current.json` y sobrevive a
+los reinicios. Debajo hay un campo **Pregunta rápida**; también se pueden mandar preguntas añadiendo
+líneas a `inbox.txt` (`/config` abre la Configuración).
+
+### Configuración (⚙)
+
+| Pestaña | Qué se ajusta |
+|---|---|
+| Audio | Dispositivo de la llamada y micrófono, ruta automática por BlackHole, sensibilidad |
+| Transcripción | Modelo Whisper, idioma, pausa que cierra una frase |
+| IA | Servidor y modelo de LM Studio (lista los cargados), creatividad, intervalos, qué genera (💬 📝 📍) |
+| Conocimiento | Carpeta de conocimiento y **Actualizar desde aiviber** (exporta un proyecto vía epona) |
+| HUD | Opacidad, tamaño de las respuestas, ancho |
+| Sesiones | Reuniones guardadas, exportar a Markdown, nueva sesión |
+
+Se guarda en `settings.json` (ignorado por git), que tiene prioridad sobre `config.py` y las variables
+de entorno; las opciones de línea de comandos tienen prioridad sobre todo. Los ajustes marcados con ↻
+se aplican al reiniciar («Guardar y reiniciar»); el resto, al momento.
+
+**Modelo recomendado** en un Mac con 32 GB o más: `Qwen3-30B-A3B-Instruct-2507` (Q4_K_M, ~18 GB):
+MoE con ~3B parámetros activos, casi tan rápido como un 7B y mucho más fiel al conocimiento. Si un
+modelo "piensa" (`<think>…</think>`), ese bloque se oculta automáticamente.
+
+Opciones de arranque (tienen prioridad sobre la Configuración): `--no-mic`, `--mic "AirPods"`,
+`--no-route` (si ya tienes tu propio dispositivo múltiple), `--model base`, `--language en`.
 
 **Usa audífonos si puedes.** Con bocinas, el mic capta la voz de los demás; el copiloto descarta ese
 eco cuando lo reconoce, pero con audífonos la transcripción de "Yo" queda limpia.

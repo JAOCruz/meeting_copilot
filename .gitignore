@@ -7,3 +7,4 @@ knowledge/*
 !knowledge/.gitkeep
 inbox.txt
 sessions/
+settings.json
