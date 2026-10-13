@@ -1,0 +1,5 @@
+faster-whisper>=1.0.3
+sounddevice>=0.4.7
+numpy>=1.26
+openai>=1.40
+PyQt6>=6.6
