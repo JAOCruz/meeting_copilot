@@ -107,6 +107,11 @@ class HudWindow(QWidget):
             "QScrollBar::add-line, QScrollBar::sub-line { height: 0; }")
         self._entries: list[list[str]] = session_store.load()  # [tipo, prefijo, texto]; sobrevive reinicios
         self._suggestion_font = cfg.hud_font_size
+        # Pegado al fondo: si el usuario está abajo, los mensajes nuevos lo mantienen abajo; si sube,
+        # se suelta y no se le mueve; si vuelve a bajar hasta el final, se pega otra vez.
+        self._follow = True
+        self._rendering = False
+        self.feed.verticalScrollBar().valueChanged.connect(self._on_user_scroll)
         QTimer.singleShot(0, self._show_restored)
 
         self.ask_input = QLineEdit()
@@ -168,11 +173,14 @@ class HudWindow(QWidget):
             self.ask_input.clear()
             self._signals.ask.emit(text)
 
+    def _on_user_scroll(self, value: int) -> None:
+        if not self._rendering:  # solo cuentan los movimientos del usuario, no los del redibujado
+            self._follow = value >= self.feed.verticalScrollBar().maximum() - 4
+
     def _show_restored(self) -> None:
-        """Muestra la sesión recuperada empezando por lo último (solo esta vez; luego no hay scroll automático)."""
+        """Muestra la sesión recuperada empezando por lo último (pegado al fondo)."""
+        self._follow = True
         self._render()
-        bar = self.feed.verticalScrollBar()
-        bar.setValue(bar.maximum())
 
     def transcript_lines(self) -> list[tuple[str, str]]:
         """Frases guardadas de la sesión, para devolverle el contexto al LLM tras un reinicio."""
@@ -194,7 +202,7 @@ class HudWindow(QWidget):
 
     def _render(self) -> None:
         bar = self.feed.verticalScrollBar()
-        position = bar.value()  # sin scroll automático: el historial se queda donde el usuario lo dejó
+        position = bar.value()
         parts = []
         for kind, prefix, text in self._entries:
             body = html.escape(text)
@@ -207,8 +215,10 @@ class HudWindow(QWidget):
                              f" font-weight:600'>{prefix}{body}</p>")
             else:
                 parts.append(f"<p style='margin:6px 0; color:#8ab4f8; font-size:13px'>{html.escape(prefix)}{body}</p>")
+        self._rendering = True
         self.feed.setHtml("".join(parts) or "<p style='color:#5f6368'>Esperando…</p>")
-        bar.setValue(position)
+        bar.setValue(bar.maximum() if self._follow else position)
+        self._rendering = False
 
     # --- arrastrar ---
     def mousePressEvent(self, event):
