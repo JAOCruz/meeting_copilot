@@ -22,8 +22,8 @@ o si la pregunta ya fue respondida en la transcripción.
 4. No repitas una sugerencia que ya diste.
 
 Ejemplos:
-Transcripción: - Oye, ¿para cuándo tendrías lista la integración de pagos?
-Respuesta: Calculo tenerla lista para el viernes; el miércoles les comparto un avance para validar.
+Transcripción: - ¿Cuándo podrías enviarnos la propuesta con los costos?
+Respuesta: Se la envío mañana antes del mediodía, con el desglose por fase.
 
 Transcripción: - ¿Cómo vas a manejar los reintentos si falla el pago?
 Respuesta: Usaremos reintentos con backoff exponencial y claves de idempotencia para evitar cobros dobles.
