@@ -5,6 +5,7 @@ import signal
 import sys
 import threading
 import time
+from pathlib import Path
 
 from PyQt6.QtCore import QTimer
 from PyQt6.QtWidgets import QApplication
@@ -18,54 +19,75 @@ from transcriber import ME, THEM, Segmenter, TranscriptBuffer, Transcriber
 
 
 class LLMWorker(threading.Thread):
-    """Despierta con cada frase nueva; agrupa ráfagas y respeta un cooldown."""
+    """Despierta con cada frase nueva; agrupa ráfagas y respeta un cooldown.
+
+    Dos tipos de trabajo: "answer" (respuesta a lo que dicen los otros) y "note" (nota sobre lo
+    que dice el usuario, solo con conocimiento cargado)."""
 
     def __init__(self, llm: LLMClient, buffer: TranscriptBuffer, signals: HudSignals, cfg: Config):
         super().__init__(daemon=True, name="llm")
         self.llm, self.buffer, self.signals, self.cfg = llm, buffer, signals, cfg
-        self._pending = threading.Event()
+        self._pending: set[str] = set()
+        self._lock = threading.Lock()
+        self._wake = threading.Event()
         self._stop = threading.Event()
         self._last_suggestion = ""
         self._last_call = 0.0
+        self._questions: list[str] = []  # preguntas escritas: se responden siempre, sin contexto
         self.paused = False
         self.idle_status = lambda: "Escuchando"
 
-    def notify(self) -> None:
+    def notify(self, kind: str = "answer") -> None:
         if not self.paused:
-            self._pending.set()
+            with self._lock:
+                self._pending.add(kind)
+            self._wake.set()
+
+    def ask(self, question: str) -> None:
+        with self._lock:
+            self._questions.append(question)
+        self._wake.set()
 
     def stop(self) -> None:
         self._stop.set()
-        self._pending.set()
+        self._wake.set()
 
     def run(self) -> None:
         while not self._stop.is_set():
-            self._pending.wait()
+            self._wake.wait()
             if self._stop.is_set():
                 return
             wait = self.cfg.llm_cooldown_seconds - (time.time() - self._last_call)
             if wait > 0:
                 time.sleep(wait)
-            self._pending.clear()  # las frases que lleguen durante la llamada disparan otra
+            with self._lock:  # lo que llegue durante la llamada dispara otra vuelta
+                kinds, self._pending = self._pending, set()
+                questions, self._questions = self._questions, []
+                self._wake.clear()
             self._last_call = time.time()
 
             self.signals.status.emit("Analizando…")
             try:
-                result = self.llm.suggest(
-                    self.buffer.snapshot(),
-                    self._last_suggestion,
-                    on_start=self.signals.suggestion_start.emit,
-                    on_token=self.signals.suggestion_token.emit,
-                )
+                for question in questions:
+                    result = self.llm.suggest([(THEM, question)], "",
+                                              on_start=self.signals.suggestion_start.emit,
+                                              on_token=self.signals.suggestion_token.emit)
+                    print(f"[llm] → {result}" if result else "[llm] NO_ACTION")
+                if "answer" in kinds:
+                    result = self.llm.suggest(self.buffer.snapshot(), self._last_suggestion,
+                                              on_start=self.signals.suggestion_start.emit,
+                                              on_token=self.signals.suggestion_token.emit)
+                    print(f"[llm] → {result}" if result else "[llm] NO_ACTION")
+                    self._last_suggestion = result or self._last_suggestion
+                if "note" in kinds:
+                    note = self.llm.note(self.buffer.snapshot(), on_start=self.signals.note_start.emit,
+                                         on_token=self.signals.note_token.emit)
+                    if note:
+                        print(f"[llm] 📝 {note}")
             except Exception as exc:  # LM Studio caído, modelo no cargado, etc.
                 print(f"[llm] Error: {exc}")
                 self.signals.status.emit("Error con LM Studio (ver terminal)")
                 continue
-            if result:
-                print(f"[llm] → {result}")
-                self._last_suggestion = result
-            else:
-                print("[llm] NO_ACTION")
             self.signals.status.emit(self.idle_status())
 
 
@@ -104,6 +126,7 @@ def main() -> int:
     llm = LLMClient(cfg)
     try:
         llm.check_connection()
+        llm.warm_up()
     except Exception as exc:
         print(f"[llm] No se pudo conectar a {cfg.llm_base_url}: {exc}\n"
               "      Abre LM Studio → Developer → Start Server, con el modelo cargado.")
@@ -125,8 +148,13 @@ def main() -> int:
 
     def on_sentence(speaker: str, text: str) -> None:
         signals.transcript.emit(speaker, text)
-        if speaker == THEM:
-            llm_worker.notify()
+        llm_worker.notify("answer" if speaker == THEM else "note")
+
+    def ask(text: str) -> None:
+        """Pregunta escrita (HUD o inbox.txt): se responde siempre, sin el contexto de la llamada."""
+        print(f"[ask] {text}")
+        signals.transcript.emit("Pregunta", text)
+        llm_worker.ask(text)
 
     workers = [Segmenter(call.queue, THEM, cfg, segments), Transcriber(segments, buffer, cfg, on_sentence),
                llm_worker]
@@ -170,6 +198,25 @@ def main() -> int:
     controls.copilot.toggled.connect(toggle_copilot)
     controls.clear.triggered.connect(buffer.clear)
     controls.quit.triggered.connect(app.quit)
+    signals.ask.connect(ask)
+
+    # inbox.txt: cada línea nueva es una pregunta (para mandarlas desde otra herramienta o un script).
+    inbox = Path(__file__).parent / "inbox.txt"
+    inbox_seen = len(inbox.read_text(encoding="utf-8").splitlines()) if inbox.exists() else 0
+
+    def poll_inbox() -> None:
+        nonlocal inbox_seen
+        if not inbox.exists():
+            return
+        lines = inbox.read_text(encoding="utf-8").splitlines()
+        for line in lines[inbox_seen:]:
+            if line.strip():
+                ask(line.strip())
+        inbox_seen = len(lines)
+
+    inbox_timer = QTimer()
+    inbox_timer.timeout.connect(poll_inbox)
+    inbox_timer.start(1000)
 
     toggle_call(True)
     controls.mic.setChecked(cfg.mic_enabled_at_start and mic is not None)
@@ -197,6 +244,7 @@ def main() -> int:
 
     # Ctrl+C en la terminal: Qt necesita un timer para que Python procese la señal
     signal.signal(signal.SIGINT, lambda *_: app.quit())
+    signal.signal(signal.SIGTERM, lambda *_: app.quit())  # `kill` también restaura la salida de audio
     timer = QTimer()
     timer.start(250)
     timer.timeout.connect(lambda: None)

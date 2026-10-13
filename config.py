@@ -38,6 +38,9 @@ class Config:
     llm_temperature: float = 0.2
     llm_max_tokens: int = 120
     llm_cooldown_seconds: float = 2.0         # mínimo entre llamadas al LLM
+    # Conocimiento del proyecto (.md/.txt) que se incluye en el prompt; ver tools/export_epona_context.py
+    context_path: str = field(default_factory=lambda: _env("COPILOT_CONTEXT", "knowledge"))
+    context_max_chars: int = 90_000           # ~22k tokens; el modelo tiene 32k cargados
 
     # --- HUD ---
     hud_width: int = 460

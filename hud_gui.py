@@ -5,8 +5,8 @@ import sys
 
 from PyQt6.QtCore import QObject, QPoint, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QAction, QColor, QFont, QGuiApplication, QIcon, QPainter, QPixmap
-from PyQt6.QtWidgets import (QHBoxLayout, QLabel, QMenu, QSystemTrayIcon, QToolButton, QVBoxLayout,
-                             QWidget)
+from PyQt6.QtWidgets import (QHBoxLayout, QLabel, QLineEdit, QMenu, QSystemTrayIcon, QToolButton,
+                             QVBoxLayout, QWidget)
 
 from config import Config
 
@@ -19,6 +19,9 @@ class HudSignals(QObject):
     transcript = pyqtSignal(str, str)  # (quién, texto)
     suggestion_start = pyqtSignal()
     suggestion_token = pyqtSignal(str)
+    note_start = pyqtSignal()
+    note_token = pyqtSignal(str)
+    ask = pyqtSignal(str)  # pregunta escrita en el HUD
 
 
 class Controls(QObject):
@@ -31,8 +34,8 @@ class Controls(QObject):
         self.copilot = self._toggle("✨ Copiloto", "Generar sugerencias con el LLM")
         self.clear = QAction("🧹", self, toolTip="Borrar transcripción y sugerencia")
         self.toggle_hud = QAction("Mostrar/ocultar HUD", self)
-        self.hide_hud = QAction("—", self, toolTip="Ocultar (vuelve desde el icono de la barra de menú)")
-        self.quit = QAction("✕", self, toolTip="Salir")
+        self.hide_hud = QAction("✕", self, toolTip="Ocultar (vuelve desde el icono verde de la barra de menú)")
+        self.quit = QAction("Salir del copiloto", self)
 
     def _toggle(self, text: str, tip: str) -> QAction:
         return QAction(text, self, checkable=True, checked=True, toolTip=tip)
@@ -85,7 +88,7 @@ class HudWindow(QWidget):
         for action in (controls.call, controls.mic, controls.copilot):
             toolbar.addWidget(self._button(action, TOGGLE_STYLE))
         toolbar.addStretch()
-        for action in (controls.clear, controls.hide_hud, controls.quit):
+        for action in (controls.clear, controls.hide_hud):
             toolbar.addWidget(self._button(action, PLAIN_STYLE))
 
         self.status_label = QLabel("● Iniciando…")
@@ -106,14 +109,31 @@ class HudWindow(QWidget):
         self.suggestion_label.setStyleSheet("color: #7CFFB2;")
         self.suggestion_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
 
+        self.note_label = QLabel("")
+        self.note_label.setWordWrap(True)
+        self.note_label.setTextFormat(Qt.TextFormat.PlainText)
+        self.note_label.setStyleSheet("color: #8ab4f8; font-size: 13px;")
+        self.note_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.note_label.hide()
+
+        self.ask_input = QLineEdit()
+        self.ask_input.setPlaceholderText("Pregunta rápida… (Enter)")
+        self.ask_input.setStyleSheet(
+            "QLineEdit { color: #e0e3e7; background: rgba(255,255,255,14); border: 1px solid rgba(255,255,255,30);"
+            " border-radius: 8px; padding: 4px 8px; font-size: 12px; }")
+        self.ask_input.returnPressed.connect(self._on_ask)
+        self._signals = signals
+
         layout.addLayout(toolbar)
-        for w in (self.status_label, self.transcript_label, self.suggestion_label):
+        for w in (self.status_label, self.transcript_label, self.suggestion_label, self.note_label, self.ask_input):
             layout.addWidget(w)
 
         signals.status.connect(lambda s: self.status_label.setText(f"● {s}"))
         signals.transcript.connect(self._on_transcript)
         signals.suggestion_start.connect(lambda: self.suggestion_label.setText(""))
         signals.suggestion_token.connect(self._on_token)
+        signals.note_start.connect(lambda: (self.note_label.setText("📝 "), self.note_label.show()))
+        signals.note_token.connect(self._on_note_token)
         controls.clear.triggered.connect(self.clear)
         controls.hide_hud.triggered.connect(self.hide)
         controls.toggle_hud.triggered.connect(lambda: self.setVisible(not self.isVisible()))
@@ -145,6 +165,17 @@ class HudWindow(QWidget):
         self._transcript_lines.clear()
         self.transcript_label.setText("")
         self.suggestion_label.setText("Esperando una pregunta…")
+        self.note_label.hide()
+        self.adjustSize()
+
+    def _on_ask(self) -> None:
+        text = self.ask_input.text().strip()
+        if text:
+            self.ask_input.clear()
+            self._signals.ask.emit(text)
+
+    def _on_note_token(self, token: str) -> None:
+        self.note_label.setText(self.note_label.text() + token)
         self.adjustSize()
 
     def _on_transcript(self, speaker: str, text: str) -> None:

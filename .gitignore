@@ -3,3 +3,6 @@ __pycache__/
 *.pyc
 .DS_Store
 tools/audio_route
+knowledge/*
+!knowledge/.gitkeep
+inbox.txt
