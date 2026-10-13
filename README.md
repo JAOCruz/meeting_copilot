@@ -1,40 +1,43 @@
 # Meeting Copilot (HUD local para macOS)
 
-Escucha el audio de una llamada (Zoom/Meet/Teams), lo transcribe con `faster-whisper`,
-le pide a un LLM local en LM Studio una sugerencia cuando alguien te hace una pregunta,
-y la muestra en una ventana flotante siempre visible. Todo corre local.
+Escucha la llamada (Zoom/Meet/Teams en Chrome o en app) y tu micrófono, transcribe ambos con
+`faster-whisper`, le pide a un LLM local en LM Studio una sugerencia cuando alguien te hace una
+pregunta, y la muestra en una ventana flotante visible en todos los escritorios y sobre apps en
+pantalla completa. Todo corre local.
 
 ```
-BlackHole 2ch → audio_capturer.py → transcriber.py (Whisper + búfer) → llm_client.py (LM Studio) → hud_gui.py
+llamada → BlackHole ─┐
+                     ├→ transcriber.py (Whisper, "Ellos"/"Yo") → llm_client.py (LM Studio) → hud_gui.py
+tu mic ──────────────┘
 ```
 
 | Archivo | Función |
 |---|---|
 | `config.py` | Parámetros (modelo, umbrales, URL de LM Studio). Sobrescribibles por env vars. |
-| `audio_capturer.py` | Captura del dispositivo, mezcla a mono y remuestrea a 16 kHz. |
-| `transcriber.py` | Corta frases por silencio, transcribe y guarda las últimas N en un búfer circular. |
-| `llm_client.py` | Prompt del sistema, streaming y filtro de `NO_ACTION`. |
-| `hud_gui.py` | Ventana PyQt6 sin bordes, semitransparente, arrastrable, siempre encima. |
+| `audio_capturer.py` | Captura de un dispositivo, mezcla a mono y remuestrea a 16 kHz. Se enciende/apaga. |
+| `audio_route.py` + `tools/audio_route.swift` | Crea el dispositivo de salida múltiple (tu salida + BlackHole) y lo activa/desactiva. |
+| `transcriber.py` | Corta frases por silencio en cada fuente, transcribe, descarta el eco del mic y guarda las últimas N. |
+| `llm_client.py` | Prompt del sistema, ejemplos, streaming y filtro de `NO_ACTION`. |
+| `hud_gui.py` | HUD PyQt6 con controles + icono en la barra de menú. |
 | `main.py` | Orquesta los hilos y conecta todo al HUD. |
 
-## 1. Instalar BlackHole y enrutar el audio
+## 1. BlackHole
 
 ```bash
-brew install blackhole-2ch     # pide reiniciar el audio / la Mac
+brew install blackhole-2ch
 ```
 
-Para **escuchar la llamada tú y a la vez enviarla a BlackHole**:
+No hace falta configurar nada más: al encender **🎧 Llamada**, el copiloto crea un dispositivo
+"Copilot (salida + BlackHole)" con tu salida actual (audífonos o bocinas) y lo pone como salida del
+sistema. Sigues oyendo la llamada y a la vez llega al copiloto. Al apagar el botón o salir, vuelve a tu
+salida normal. También puedes manejarlo a mano:
 
-1. Abre **Configuración de Audio MIDI** (`/Applications/Utilities/Audio MIDI Setup.app`).
-2. Botón **+** → **Crear dispositivo de salida múltiple**.
-3. Marca **tus audífonos/bocinas** y **BlackHole 2ch**. Pon tus audífonos como *dispositivo principal*
-   y activa *Corrección de deriva* en BlackHole.
-4. En Zoom/Meet/Teams (o en Ajustes del Sistema → Sonido → Salida) elige ese **Dispositivo de salida múltiple** como altavoz.
-   Tu micrófono sigue siendo el normal.
+```bash
+swift tools/audio_route.swift on|off   # sin argumento muestra el estado
+```
 
-Así el copiloto solo oye a los demás participantes, no a ti — justo lo que necesita para detectar preguntas dirigidas a ti.
-
-> Nota: con el dispositivo de salida múltiple, el volumen del Mac no se controla con las teclas; ajústalo en la app de la llamada.
+Si Zoom/Meet tienen elegido un altavoz concreto en sus ajustes, ponlo en "Igual que el sistema".
+Mientras está activo, el volumen se ajusta en la app de la llamada, no con las teclas.
 
 ## 2. LM Studio
 
@@ -53,7 +56,7 @@ source .venv/bin/activate
 pip install -r requirements.txt
 
 python main.py --list-devices     # confirma que aparece "BlackHole 2ch"
-python main.py                    # usa BlackHole, Whisper "small", español
+python main.py                    # llamada + tu mic, Whisper "small", español
 ```
 
 La primera vez descarga el modelo de Whisper (~480 MB para `small`).
@@ -68,8 +71,23 @@ COPILOT_LLM_MODEL=qwen2.5-7b-instruct python main.py
 COPILOT_SILENCE_RMS=0.004 python main.py   # si el audio entra bajo y no detecta frases
 ```
 
-En el HUD: **arrastra** para moverlo, **doble clic** para cerrarlo. `Ctrl+C` en la terminal también lo cierra.
-El HUD aparece en todos los escritorios y encima de apps en pantalla completa (Zoom, Meet, Teams).
+### Controles
+
+En el HUD (arrástralo para moverlo) y en el icono verde de la barra de menú:
+
+| Botón | Qué hace |
+|---|---|
+| 🎧 Llamada | Escucha la llamada. Activa/desactiva también la ruta de audio por BlackHole. |
+| 🎙 Mi mic | Escucha tu micrófono (aparece como **Yo**; da contexto, no dispara sugerencias). Al apagarlo se apaga el indicador naranja de macOS. |
+| ✨ Copiloto | Pausa/reanuda las sugerencias del LLM (la transcripción sigue). |
+| 🧹 | Borra la transcripción y la sugerencia. |
+| — | Oculta el HUD; vuelve desde el icono de la barra de menú. |
+| ✕ | Sale y restaura tu salida de audio. |
+
+Opciones de arranque: `--no-mic`, `--mic "AirPods"`, `--no-route` (si ya tienes tu propio dispositivo múltiple).
+
+**Usa audífonos si puedes.** Con bocinas, el mic capta la voz de los demás; el copiloto descarta ese
+eco cuando lo reconoce, pero con audífonos la transcripción de "Yo" queda limpia.
 
 Antes de una llamada real, prueba poniendo un video de YouTube con alguien haciendo preguntas
 y la salida en el dispositivo múltiple.

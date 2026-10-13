@@ -4,11 +4,13 @@ from typing import Callable, Iterable
 from openai import OpenAI
 
 from config import Config
+from transcriber import ME, THEM
 
 NO_ACTION = "NO_ACTION"
 
 SYSTEM_PROMPT = f"""Eres un copiloto silencioso que asiste al usuario durante una reunión en vivo.
-Recibirás lo que dicen los OTROS participantes (el usuario no aparece): un CONTEXTO previo y la FRASE NUEVA.
+Recibirás un CONTEXTO de la conversación ("Ellos" = otros participantes, "Yo" = el usuario) \
+y la FRASE NUEVA, dicha por otro participante.
 
 Decide SOLO sobre la FRASE NUEVA (el contexto sirve para entenderla, no para decidir):
 - Si la FRASE NUEVA es una pregunta de trabajo (plazos, cómo se hará algo, opinión, estado, costos, \
@@ -23,10 +25,11 @@ Sin preámbulos, comillas ni explicaciones. Los nombres pueden venir mal transcr
 FEW_SHOT = [
     ("(ninguno)", "¿Cuándo podrías enviarnos la propuesta con los costos?",
      "Se la envío mañana antes del mediodía, con el desglose por fase."),
-    ("- Buenos días a todos.\n- Qué frío hace en esta oficina.",
+    (f"{THEM}: Buenos días a todos.\n{ME}: Buenos días.\n{THEM}: Qué frío hace en esta oficina.",
      "Oye, ¿cómo vas a manejar los reintentos si falla un pago?",
      "Usaremos reintentos con backoff exponencial y claves de idempotencia para evitar cobros dobles."),
-    ("- ¿Cuál es el estado del módulo de reportes?", "Sí, y el tráfico hoy estaba horrible.", NO_ACTION),
+    (f"{THEM}: ¿Cuál es el estado del módulo de reportes?\n{ME}: Está casi listo, falta probarlo.",
+     "Perfecto. Oye, y el tráfico hoy estaba horrible.", NO_ACTION),
     ("(ninguno)", "Creo que el cronograma es demasiado agresivo.",
      "Entiendo; podemos priorizar lo crítico para la primera entrega y mover el resto a una segunda fase."),
     ("(ninguno)", "Hola, ¿me escuchan bien?", NO_ACTION),
@@ -52,10 +55,7 @@ class LLMClient:
             print(f"[llm] Aviso: '{self.cfg.llm_model}' no aparece en la lista; "
                   "usa COPILOT_LLM_MODEL con uno de los anteriores.")
 
-    def _stream(self, transcript: str, previous: str) -> Iterable[str]:
-        lines = transcript.splitlines()
-        context = "\n".join(lines[:-1]) or "(ninguno)"
-        newest = lines[-1].removeprefix("- ") if lines else ""
+    def _stream(self, context: str, newest: str, previous: str) -> Iterable[str]:
         messages = [{"role": "system", "content": SYSTEM_PROMPT}]
         for ex_context, ex_newest, ex_answer in FEW_SHOT:
             messages.append({"role": "user", "content": build_user_message(ex_context, ex_newest)})
@@ -72,16 +72,24 @@ class LLMClient:
             if chunk.choices and chunk.choices[0].delta.content:
                 yield chunk.choices[0].delta.content
 
-    def suggest(self, transcript: str, previous: str, on_start: Callable[[], None],
+    def suggest(self, lines: list[tuple[str, str]], previous: str, on_start: Callable[[], None],
                 on_token: Callable[[str], None]) -> str | None:
-        """Devuelve la sugerencia completa, o None si el modelo respondió NO_ACTION.
+        """Decide sobre la última frase de los otros participantes (`lines` = [(quién, texto)]).
+
+        Devuelve la sugerencia completa, o None si el modelo respondió NO_ACTION.
 
         Retiene los primeros tokens hasta saber si la respuesta es NO_ACTION, para que el HUD
         no parpadee; a partir de ahí reenvía cada token en vivo con `on_token`.
         """
+        last_them = max((i for i, (speaker, _) in enumerate(lines) if speaker == THEM), default=None)
+        if last_them is None:
+            return None
+        newest = lines[last_them][1]
+        context = "\n".join(f"{speaker}: {text}" for speaker, text in lines[:last_them]) or "(ninguno)"
+
         text = ""
         started = False
-        for token in filter_no_action(self._stream(transcript, previous)):
+        for token in filter_no_action(self._stream(context, newest, previous)):
             if not started:
                 on_start()
                 started = True

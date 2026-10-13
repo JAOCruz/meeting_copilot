@@ -14,6 +14,8 @@ def _env(name: str, default):
 class Config:
     # --- Audio ---
     audio_device: str = field(default_factory=lambda: _env("COPILOT_AUDIO_DEVICE", "BlackHole"))
+    mic_device: str = field(default_factory=lambda: _env("COPILOT_MIC_DEVICE", ""))  # "" = entrada por defecto
+    mic_enabled_at_start: bool = True
     target_sample_rate: int = 16_000          # Whisper trabaja a 16 kHz mono
 
     # --- Segmentación (VAD por energía) ---
@@ -39,5 +41,5 @@ class Config:
 
     # --- HUD ---
     hud_width: int = 460
-    hud_opacity: float = 0.88
+    hud_opacity: float = 0.97
     hud_font_size: int = 15

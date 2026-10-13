@@ -14,6 +14,11 @@ def list_input_devices() -> None:
 
 
 def find_device(name_or_index: str) -> int:
+    if name_or_index == "":
+        default_input = sd.default.device[0]
+        if default_input is None or default_input < 0:
+            raise RuntimeError("No hay dispositivo de entrada por defecto.")
+        return int(default_input)
     if name_or_index.isdigit():
         return int(name_or_index)
     for idx, dev in enumerate(sd.query_devices()):
@@ -37,7 +42,7 @@ def resample(audio: np.ndarray, src_rate: int, dst_rate: int) -> np.ndarray:
 
 
 class AudioCapturer:
-    """Abre un InputStream y entrega bloques mono de 16 kHz a una cola."""
+    """Abre un InputStream y entrega bloques mono de 16 kHz a una cola. Se puede encender y apagar."""
 
     def __init__(self, device: str, target_rate: int = 16_000, block_seconds: float = 0.1):
         self.device_index = find_device(device)
@@ -64,7 +69,13 @@ class AudioCapturer:
         except queue.Full:
             pass  # el transcriptor va atrasado; descartamos para no acumular latencia
 
+    @property
+    def running(self) -> bool:
+        return self._stream is not None
+
     def start(self) -> None:
+        if self._stream is not None:
+            return
         self._stream = sd.InputStream(
             device=self.device_index,
             channels=self.channels,
@@ -79,12 +90,14 @@ class AudioCapturer:
 
     def seconds_of_digital_silence(self) -> float:
         """Segundos seguidos recibiendo ceros exactos (sin permiso de micrófono o nada sonando)."""
-        if not self.started_at:
+        if not self.running:
             return 0.0
         return time.time() - max(self.last_signal_at, self.started_at)
 
     def stop(self) -> None:
+        """Cierra el stream (en el mic, apaga el indicador naranja de macOS)."""
         if self._stream is not None:
             self._stream.stop()
             self._stream.close()
             self._stream = None
+            print(f"[audio] Detenido '{self.device_name}'")

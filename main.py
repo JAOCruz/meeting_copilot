@@ -1,5 +1,6 @@
-"""Meeting Copilot: audio (BlackHole) → Whisper → LM Studio → HUD."""
+"""Meeting Copilot: llamada (BlackHole) + tu mic → Whisper → LM Studio → HUD."""
 import argparse
+import queue
 import signal
 import sys
 import threading
@@ -9,10 +10,11 @@ from PyQt6.QtCore import QTimer
 from PyQt6.QtWidgets import QApplication
 
 from audio_capturer import AudioCapturer, list_input_devices
+from audio_route import set_route
 from config import Config
-from hud_gui import HudSignals, HudWindow
+from hud_gui import Controls, HudSignals, HudWindow, create_tray, make_accessory_app
 from llm_client import LLMClient
-from transcriber import TranscriptBuffer, Transcriber
+from transcriber import ME, THEM, Segmenter, TranscriptBuffer, Transcriber
 
 
 class LLMWorker(threading.Thread):
@@ -25,9 +27,12 @@ class LLMWorker(threading.Thread):
         self._stop = threading.Event()
         self._last_suggestion = ""
         self._last_call = 0.0
+        self.paused = False
+        self.idle_status = lambda: "Escuchando"
 
     def notify(self) -> None:
-        self._pending.set()
+        if not self.paused:
+            self._pending.set()
 
     def stop(self) -> None:
         self._stop.set()
@@ -47,7 +52,7 @@ class LLMWorker(threading.Thread):
             self.signals.status.emit("Analizando…")
             try:
                 result = self.llm.suggest(
-                    self.buffer.as_text(),
+                    self.buffer.snapshot(),
                     self._last_suggestion,
                     on_start=self.signals.suggestion_start.emit,
                     on_token=self.signals.suggestion_token.emit,
@@ -61,13 +66,17 @@ class LLMWorker(threading.Thread):
                 self._last_suggestion = result
             else:
                 print("[llm] NO_ACTION")
-            self.signals.status.emit("Escuchando")
+            self.signals.status.emit(self.idle_status())
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Copiloto de reuniones en tiempo real")
     parser.add_argument("--list-devices", action="store_true", help="lista dispositivos de entrada y sale")
-    parser.add_argument("--device", help="nombre (parcial) o índice del dispositivo de audio")
+    parser.add_argument("--device", help="dispositivo de la llamada (nombre parcial o índice)")
+    parser.add_argument("--mic", help="tu micrófono (nombre parcial o índice); por defecto, la entrada del sistema")
+    parser.add_argument("--no-mic", action="store_true", help="arranca con el micrófono apagado")
+    parser.add_argument("--no-route", action="store_true",
+                        help="no cambiar la salida de audio del sistema (ya tienes tu propio dispositivo múltiple)")
     parser.add_argument("--model", help="modelo Whisper: tiny, base, small, medium, large-v3…")
     parser.add_argument("--language", help="código de idioma (es, en…) o '' para auto")
     args = parser.parse_args()
@@ -79,15 +88,18 @@ def main() -> int:
     cfg = Config()
     if args.device:
         cfg.audio_device = args.device
+    if args.mic is not None:
+        cfg.mic_device = args.mic
+    if args.no_mic:
+        cfg.mic_enabled_at_start = False
     if args.model:
         cfg.whisper_model = args.model
     if args.language is not None:
         cfg.whisper_language = args.language
 
     app = QApplication(sys.argv)
-    signals = HudSignals()
-    hud = HudWindow(cfg, signals)
-    hud.show()
+    app.setQuitOnLastWindowClosed(False)  # ocultar el HUD no debe cerrar la app
+    make_accessory_app()
 
     llm = LLMClient(cfg)
     try:
@@ -97,32 +109,86 @@ def main() -> int:
               "      Abre LM Studio → Developer → Start Server, con el modelo cargado.")
         return 1
 
-    capturer = AudioCapturer(cfg.audio_device, cfg.target_sample_rate)
+    call = AudioCapturer(cfg.audio_device, cfg.target_sample_rate)
+    try:
+        mic = AudioCapturer(cfg.mic_device, cfg.target_sample_rate)
+        if mic.device_index == call.device_index:
+            mic = AudioCapturer("MacBook", cfg.target_sample_rate)
+    except RuntimeError as exc:
+        print(f"[audio] Micrófono no disponible: {exc}")
+        mic = None
+
     buffer = TranscriptBuffer(cfg.buffer_max_sentences)
+    segments: "queue.Queue" = queue.Queue()
+    signals = HudSignals()
     llm_worker = LLMWorker(llm, buffer, signals, cfg)
 
-    def on_sentence(text: str) -> None:
-        signals.transcript.emit(text)
-        llm_worker.notify()
+    def on_sentence(speaker: str, text: str) -> None:
+        signals.transcript.emit(speaker, text)
+        if speaker == THEM:
+            llm_worker.notify()
 
-    transcriber = Transcriber(capturer.queue, buffer, cfg, on_sentence)
+    workers = [Segmenter(call.queue, THEM, cfg, segments), Transcriber(segments, buffer, cfg, on_sentence),
+               llm_worker]
+    if mic:
+        workers.append(Segmenter(mic.queue, ME, cfg, segments))
+    for worker in workers:
+        worker.start()
 
-    transcriber.start()
-    llm_worker.start()
-    capturer.start()
-    signals.status.emit(f"Escuchando · {capturer.device_name}")
+    controls = Controls(app)
+    hud = HudWindow(cfg, signals, controls)
+    tray = create_tray(controls, app)
+
+    def status_text() -> str:
+        sources = [name for name, cap in (("llamada", call), ("tu mic", mic)) if cap and cap.running]
+        if not sources:
+            return "En pausa · no escucha nada"
+        suffix = "" if controls.copilot.isChecked() else " · sugerencias en pausa"
+        return f"Escuchando {' + '.join(sources)}{suffix}"
+
+    def toggle_call(on: bool) -> None:
+        if not args.no_route:
+            print(f"[audio] {set_route(on)}")
+        call.start() if on else call.stop()
+        signals.status.emit(status_text())
+
+    def toggle_mic(on: bool) -> None:
+        if mic is None:
+            controls.mic.setChecked(False)
+            signals.status.emit("No hay micrófono disponible")
+            return
+        mic.start() if on else mic.stop()
+        signals.status.emit(status_text())
+
+    def toggle_copilot(on: bool) -> None:
+        llm_worker.paused = not on
+        signals.status.emit(status_text())
+
+    llm_worker.idle_status = status_text
+    controls.call.toggled.connect(toggle_call)
+    controls.mic.toggled.connect(toggle_mic)
+    controls.copilot.toggled.connect(toggle_copilot)
+    controls.clear.triggered.connect(buffer.clear)
+    controls.quit.triggered.connect(app.quit)
+
+    toggle_call(True)
+    controls.mic.setChecked(cfg.mic_enabled_at_start and mic is not None)
+    if controls.mic.isChecked():
+        mic.start()
+    hud.show()
+    signals.status.emit(status_text())
 
     silence_warned = False
 
     def check_audio() -> None:
         nonlocal silence_warned
-        silent = capturer.seconds_of_digital_silence() > 30
+        silent = call.seconds_of_digital_silence() > 30
         if silent and not silence_warned:
-            print("[audio] 30 s de ceros absolutos. Si hay audio sonando, la app de terminal no tiene "
-                  "permiso de micrófono (Ajustes → Privacidad y seguridad → Micrófono).")
-            signals.status.emit("En silencio · si la llamada suena, revisa el permiso de micrófono")
+            print("[audio] 30 s sin nada en BlackHole. Si la llamada suena, revisa que la salida del sistema sea "
+                  "'Copilot (salida + BlackHole)' y que tu terminal tenga permiso de micrófono.")
+            signals.status.emit("La llamada no llega · ¿suena algo? (ver terminal)")
         elif not silent and silence_warned:
-            signals.status.emit(f"Escuchando · {capturer.device_name}")
+            signals.status.emit(status_text())
         silence_warned = silent
 
     audio_timer = QTimer()
@@ -136,9 +202,14 @@ def main() -> int:
     timer.timeout.connect(lambda: None)
 
     code = app.exec()
-    capturer.stop()
-    transcriber.stop()
-    llm_worker.stop()
+    tray.hide()
+    call.stop()
+    if mic:
+        mic.stop()
+    if not args.no_route:
+        print(f"[audio] {set_route(False)}")  # devuelve la salida normal (y las teclas de volumen)
+    for worker in workers:
+        worker.stop()
     return code
 
 
