@@ -85,11 +85,12 @@ FEW_SHOT = [
 NOTE_MESSAGE = """CONTEXTO:
 {context}
 
-MODO NOTA: esta vez la frase la dijo el USUARIO (Yo): «{newest}»
+MODO NOTA: esta vez la frase la dijo el USUARIO (Yo), que está explicando el sistema: «{newest}»
 No escribas una respuesta para decir en voz alta. Escribe una NOTA para que el usuario la lea mientras \
-habla: complementa o corrige lo que está diciendo con datos exactos del CONOCIMIENTO (ruta de menú, \
-regla, tipo de comprobante, a quién preguntar), máximo 2 oraciones. Si lo que dice no tiene relación \
-con el CONOCIMIENTO, ya es correcto y completo, o no hay nada útil que añadir, responde NO_ACTION."""
+habla, que le sirva para explicar mejor: un dato exacto del CONOCIMIENTO relacionado (ruta de menú, \
+regla, tipo de comprobante, cuenta, impuesto), una advertencia, o algo que conviene mencionar a los \
+participantes. Máximo 2 oraciones. Escribe siempre la nota (aquí no existe NO_ACTION): si el \
+CONOCIMIENTO no tiene un dato exacto, da el consejo práctico más útil para explicar ese tema."""
 
 SECTION_MESSAGE = """MODO PANTALLA: el usuario acaba de abrir en Odoo la pantalla «{title}» (ruta {path}).
 No es una pregunta. Escribe una NOTA para que el usuario la lea: para qué sirve esta pantalla y el dato, \
@@ -101,12 +102,18 @@ FEW_SHOT_NOTE = [
     ("Ellos: ¿Y dónde veo lo que me deben los clientes?",
      "Eso lo ven en el sistema, en la parte de clientes.",
      "Ruta exacta: Ventas > Clientes > Estado de cuenta; ahí ven saldo y vencimientos por cliente."),
-    ("Ellos: Gracias, quedó claro.", "Perfecto, cualquier cosa me escriben.", NO_ACTION),
+    ("(ninguno)", "Cuando confirmen la factura ya queda registrada en contabilidad.",
+     "Menciona que al confirmar se genera el asiento y el número fiscal, y que ya no se edita: "
+     "si hay un error se corrige con una nota de crédito."),
+    ("(ninguno)", "Aquí está la lista de proveedores con sus datos.",
+     "Buen momento para recordar que las retenciones (ISR/ITBIS) se marcan en la factura del proveedor "
+     "y alimentan el reporte de compras."),
 ]
 
 # Solo se piden notas cuando el usuario habla de estos temas (evita llamar al LLM por cada frase).
+# El modo nota no admite NO_ACTION: este filtro es quien decide cuándo comentar.
 NOTE_TOPICS = re.compile(
-    r"factur|contab|asiento|diario|ncf|comprobante|itbis|impuesto|retenc|isr|dgii|60[678]|nota de cr[eé]dito|"
+    r"factur|fatur|electr[oó]nic|e-?cf|contab|asiento|diario|ncf|comprobante|itbis|impuesto|retenc|isr|dgii|60[678]|nota de cr[eé]dito|"
     r"cuenta|pago|cobr|proveedor|cliente|banco|concilia|extracto|n[oó]mina|quincena|tss|afp|sfs|"
     r"balance|estado de resultados|anal[ií]tic|plan de cuentas|t[eé]rmino|venc|anular|cancelar|borrar",
     re.IGNORECASE)
@@ -173,7 +180,11 @@ class LLMClient:
         if last_them is None:
             return None
         context = "\n".join(f"{speaker}: {text}" for speaker, text in lines[:last_them]) or "(ninguno)"
-        message = build_user_message(context, lines[last_them][1], previous)
+        newest = lines[last_them][1]
+        message = build_user_message(context, newest, previous)
+        if "?" in newest or "¿" in newest:
+            # Una pregunta explícita siempre merece propuesta: el 7B tiende a NO_ACTION con mucho contexto.
+            message += "\n\nLa FRASE NUEVA es una pregunta: responde siempre (aquí no uses NO_ACTION)."
         return self._complete(message, on_start, on_token)
 
     def note(self, lines: list[tuple[str, str]], on_start: Callable[[], None],

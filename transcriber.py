@@ -4,6 +4,7 @@ Cada fuente (llamada = "Ellos", micrófono = "Yo") tiene su propio Segmenter; un
 Transcriber comparte el modelo Whisper entre ambas y etiqueta cada frase con su fuente.
 """
 import queue
+import re
 import threading
 import time
 from collections import deque
@@ -46,6 +47,13 @@ class TranscriptBuffer:
     def snapshot(self) -> list[tuple[str, str]]:
         with self._lock:
             return list(self._lines)
+
+
+# Frases que Whisper "alucina" con silencio o ruido (vienen de subtítulos de YouTube en su entrenamiento).
+HALLUCINATIONS = re.compile(
+    r"^\W*(¡?suscr[ií]bete!?|gracias por ver( el video)?|nos vemos en el pr[oó]ximo v[ií]deo|"
+    r"subt[ií]tulos (realizados )?por.*|amara\.org.*|¡?like y suscr[ií]bete!?|thanks for watching)\W*$",
+    re.IGNORECASE)
 
 
 def _similar(a: str, b: str) -> bool:
@@ -131,7 +139,7 @@ class Transcriber(threading.Thread):
             condition_on_previous_text=False,
         )
         text = " ".join(s.text.strip() for s in segments).strip()
-        if not text:
+        if not text or HALLUCINATIONS.match(text):
             return
         if not self.buffer.add(speaker, text):
             print(f"[stt] (eco descartado) {speaker}: {text}")
