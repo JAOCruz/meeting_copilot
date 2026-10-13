@@ -46,3 +46,4 @@ class Config:
     hud_width: int = 460
     hud_opacity: float = 0.97
     hud_font_size: int = 15
+    hud_feed_height: int = 380               # alto inicial del historial (se agranda con la esquina)

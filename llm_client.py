@@ -91,6 +91,11 @@ habla: complementa o corrige lo que está diciendo con datos exactos del CONOCIM
 regla, tipo de comprobante, a quién preguntar), máximo 2 oraciones. Si lo que dice no tiene relación \
 con el CONOCIMIENTO, ya es correcto y completo, o no hay nada útil que añadir, responde NO_ACTION."""
 
+SECTION_MESSAGE = """MODO PANTALLA: el usuario acaba de abrir en Odoo la pantalla «{title}» (ruta {path}).
+No es una pregunta. Escribe una NOTA para que el usuario la lea: para qué sirve esta pantalla y el dato, \
+regla o cuidado más útil que el CONOCIMIENTO tenga sobre ella (ruta de menú, impuesto, comprobante, \
+quién decide). Máximo 2 oraciones. Si el CONOCIMIENTO no dice nada útil sobre esta pantalla, responde NO_ACTION."""
+
 # Ejemplos del modo nota (fijos: forman parte del prefijo que LM Studio reutiliza).
 FEW_SHOT_NOTE = [
     ("Ellos: ¿Y dónde veo lo que me deben los clientes?",
@@ -181,6 +186,13 @@ class LLMClient:
         context = "\n".join(f"{speaker}: {text}" for speaker, text in lines[:last_me]) or "(ninguno)"
         message = NOTE_MESSAGE.format(context=context, newest=lines[last_me][1])
         return self._complete(message, on_start, on_token)
+
+    def section(self, title: str, path: str, on_start: Callable[[], None],
+                on_token: Callable[[str], None]) -> str | None:
+        """Nota sobre la pantalla de Odoo que el usuario acaba de abrir (solo con conocimiento)."""
+        if not self.knowledge:
+            return None
+        return self._complete(SECTION_MESSAGE.format(title=title, path=path), on_start, on_token)
 
     def warm_up(self) -> None:
         """Procesa el prompt del sistema una vez para que la primera pregunta real sea rápida."""

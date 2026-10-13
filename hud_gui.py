@@ -5,8 +5,8 @@ import sys
 
 from PyQt6.QtCore import QObject, QPoint, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QAction, QColor, QFont, QGuiApplication, QIcon, QPainter, QPixmap
-from PyQt6.QtWidgets import (QHBoxLayout, QLabel, QLineEdit, QMenu, QSystemTrayIcon, QToolButton,
-                             QVBoxLayout, QWidget)
+from PyQt6.QtWidgets import (QHBoxLayout, QLabel, QLineEdit, QMenu, QSizeGrip, QSystemTrayIcon,
+                             QTextBrowser, QToolButton, QVBoxLayout, QWidget)
 
 from config import Config
 
@@ -19,7 +19,7 @@ class HudSignals(QObject):
     transcript = pyqtSignal(str, str)  # (quién, texto)
     suggestion_start = pyqtSignal()
     suggestion_token = pyqtSignal(str)
-    note_start = pyqtSignal()
+    note_start = pyqtSignal(str)  # prefijo: "📝 " (lo que dices) o "📍 Pantalla: "
     note_token = pyqtSignal(str)
     ask = pyqtSignal(str)  # pregunta escrita en el HUD
 
@@ -32,6 +32,7 @@ class Controls(QObject):
         self.call = self._toggle("🎧 Llamada", "Escuchar el audio de la llamada (BlackHole)")
         self.mic = self._toggle("🎙 Mi mic", "Escuchar tu micrófono (aparece como 'Yo')")
         self.copilot = self._toggle("✨ Copiloto", "Generar sugerencias con el LLM")
+        self.screen = self._toggle("📍 Pantalla", "Notas sobre la pantalla de Odoo abierta en Chrome")
         self.clear = QAction("🧹", self, toolTip="Borrar transcripción y sugerencia")
         self.toggle_hud = QAction("Mostrar/ocultar HUD", self)
         self.hide_hud = QAction("✕", self, toolTip="Ocultar (vuelve desde el icono verde de la barra de menú)")
@@ -64,9 +65,9 @@ class HudWindow(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
         self.setWindowOpacity(cfg.hud_opacity)
-        self.setFixedWidth(cfg.hud_width)
+        self.setMinimumWidth(320)
+        self.resize(cfg.hud_width, 10)
         self._drag_offset: QPoint | None = None
-        self._transcript_lines: list[tuple[str, str]] = []
 
         container = QWidget(self)
         container.setObjectName("card")
@@ -85,7 +86,7 @@ class HudWindow(QWidget):
 
         toolbar = QHBoxLayout()
         toolbar.setSpacing(6)
-        for action in (controls.call, controls.mic, controls.copilot):
+        for action in (controls.call, controls.mic, controls.copilot, controls.screen):
             toolbar.addWidget(self._button(action, TOGGLE_STYLE))
         toolbar.addStretch()
         for action in (controls.clear, controls.hide_hud):
@@ -94,27 +95,17 @@ class HudWindow(QWidget):
         self.status_label = QLabel("● Iniciando…")
         self.status_label.setStyleSheet("color: #8a8f98; font-size: 11px;")
 
-        self.transcript_label = QLabel("")
-        self.transcript_label.setWordWrap(True)
-        self.transcript_label.setTextFormat(Qt.TextFormat.RichText)
-        self.transcript_label.setStyleSheet("color: #9aa0a6; font-size: 12px;")
-
-        self.suggestion_label = QLabel("Esperando una pregunta…")
-        self.suggestion_label.setWordWrap(True)
-        self.suggestion_label.setTextFormat(Qt.TextFormat.PlainText)
-        font = QFont()  # fuente del sistema (San Francisco en macOS)
-        font.setPointSize(cfg.hud_font_size)
-        font.setWeight(QFont.Weight.DemiBold)
-        self.suggestion_label.setFont(font)
-        self.suggestion_label.setStyleSheet("color: #7CFFB2;")
-        self.suggestion_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-
-        self.note_label = QLabel("")
-        self.note_label.setWordWrap(True)
-        self.note_label.setTextFormat(Qt.TextFormat.PlainText)
-        self.note_label.setStyleSheet("color: #8ab4f8; font-size: 13px;")
-        self.note_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        self.note_label.hide()
+        # Historial de toda la sesión: lo que se dice, las respuestas y las notas, en orden.
+        self.feed = QTextBrowser()
+        self.feed.setOpenLinks(False)
+        self.feed.setMinimumHeight(cfg.hud_feed_height)
+        self.feed.setStyleSheet(
+            "QTextBrowser { background: transparent; border: none; color: #c8ccd2; font-size: 12px; }"
+            "QScrollBar:vertical { width: 6px; background: transparent; }"
+            "QScrollBar::handle:vertical { background: rgba(255,255,255,60); border-radius: 3px; }"
+            "QScrollBar::add-line, QScrollBar::sub-line { height: 0; }")
+        self._entries: list[list[str]] = []  # [tipo, prefijo, texto]
+        self._suggestion_font = cfg.hud_font_size
 
         self.ask_input = QLineEdit()
         self.ask_input.setPlaceholderText("Pregunta rápida… (Enter)")
@@ -125,15 +116,19 @@ class HudWindow(QWidget):
         self._signals = signals
 
         layout.addLayout(toolbar)
-        for w in (self.status_label, self.transcript_label, self.suggestion_label, self.note_label, self.ask_input):
-            layout.addWidget(w)
+        layout.addWidget(self.status_label)
+        layout.addWidget(self.feed, 1)
+        bottom = QHBoxLayout()
+        bottom.addWidget(self.ask_input, 1)
+        bottom.addWidget(QSizeGrip(self), 0, Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignRight)
+        layout.addLayout(bottom)
 
         signals.status.connect(lambda s: self.status_label.setText(f"● {s}"))
         signals.transcript.connect(self._on_transcript)
-        signals.suggestion_start.connect(lambda: self.suggestion_label.setText(""))
-        signals.suggestion_token.connect(self._on_token)
-        signals.note_start.connect(lambda: (self.note_label.setText("📝 "), self.note_label.show()))
-        signals.note_token.connect(self._on_note_token)
+        signals.suggestion_start.connect(lambda: self._add("answer", "💬 ", ""))
+        signals.suggestion_token.connect(self._append_token)
+        signals.note_start.connect(lambda prefix: self._add("note", prefix, ""))
+        signals.note_token.connect(self._append_token)
         controls.clear.triggered.connect(self.clear)
         controls.hide_hud.triggered.connect(self.hide)
         controls.toggle_hud.triggered.connect(lambda: self.setVisible(not self.isVisible()))
@@ -158,15 +153,11 @@ class HudWindow(QWidget):
 
     def _place_top_right(self) -> None:
         screen = QGuiApplication.primaryScreen().availableGeometry()
-        self.adjustSize()
         self.move(screen.right() - self.width() - 24, screen.top() + 24)
 
     def clear(self) -> None:
-        self._transcript_lines.clear()
-        self.transcript_label.setText("")
-        self.suggestion_label.setText("Esperando una pregunta…")
-        self.note_label.hide()
-        self.adjustSize()
+        self._entries.clear()
+        self._render()
 
     def _on_ask(self) -> None:
         text = self.ask_input.text().strip()
@@ -174,21 +165,36 @@ class HudWindow(QWidget):
             self.ask_input.clear()
             self._signals.ask.emit(text)
 
-    def _on_note_token(self, token: str) -> None:
-        self.note_label.setText(self.note_label.text() + token)
-        self.adjustSize()
-
     def _on_transcript(self, speaker: str, text: str) -> None:
-        self._transcript_lines = (self._transcript_lines + [(speaker, text)])[-3:]
-        self.transcript_label.setText("<br>".join(
-            f"<b style='color:{SPEAKER_COLORS.get(s, '#e0e3e7')}'>{s}:</b> {html.escape(t[-140:])}"
-            for s, t in self._transcript_lines
-        ))
-        self.adjustSize()
+        self._add("line", speaker, text)
 
-    def _on_token(self, token: str) -> None:
-        self.suggestion_label.setText(self.suggestion_label.text() + token)
-        self.adjustSize()
+    def _add(self, kind: str, prefix: str, text: str) -> None:
+        self._entries.append([kind, prefix, text])
+        self._render()
+
+    def _append_token(self, token: str) -> None:
+        if self._entries:
+            self._entries[-1][2] += token
+            self._render()
+
+    def _render(self) -> None:
+        bar = self.feed.verticalScrollBar()
+        at_bottom = bar.value() >= bar.maximum() - 4
+        parts = []
+        for kind, prefix, text in self._entries:
+            body = html.escape(text)
+            if kind == "line":
+                color = SPEAKER_COLORS.get(prefix, "#e0e3e7")
+                parts.append(f"<p style='margin:2px 0'><b style='color:{color}'>{html.escape(prefix)}:</b> "
+                             f"<span style='color:#9aa0a6'>{body}</span></p>")
+            elif kind == "answer":
+                parts.append(f"<p style='margin:6px 0; color:#7CFFB2; font-size:{self._suggestion_font}px;"
+                             f" font-weight:600'>{prefix}{body}</p>")
+            else:
+                parts.append(f"<p style='margin:6px 0; color:#8ab4f8; font-size:13px'>{html.escape(prefix)}{body}</p>")
+        self.feed.setHtml("".join(parts) or "<p style='color:#5f6368'>Esperando…</p>")
+        if at_bottom:
+            bar.setValue(bar.maximum())
 
     # --- arrastrar ---
     def mousePressEvent(self, event):
@@ -217,7 +223,7 @@ def create_tray(controls: Controls, parent: QObject) -> QSystemTrayIcon:
     menu = QMenu()
     menu.addAction(controls.toggle_hud)
     menu.addSeparator()
-    for action in (controls.call, controls.mic, controls.copilot):
+    for action in (controls.call, controls.mic, controls.copilot, controls.screen):
         menu.addAction(action)
     menu.addSeparator()
     menu.addAction("Borrar transcripción", controls.clear.trigger)

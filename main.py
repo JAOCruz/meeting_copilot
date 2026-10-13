@@ -15,6 +15,7 @@ from audio_route import set_route
 from config import Config
 from hud_gui import Controls, HudSignals, HudWindow, create_tray, make_accessory_app
 from llm_client import LLMClient
+from screen_context import active_odoo_screen, section_key
 from transcriber import ME, THEM, Segmenter, TranscriptBuffer, Transcriber
 
 
@@ -34,6 +35,7 @@ class LLMWorker(threading.Thread):
         self._last_suggestion = ""
         self._last_call = 0.0
         self._questions: list[str] = []  # preguntas escritas: se responden siempre, sin contexto
+        self._screen: tuple[str, str] | None = None  # pantalla de Odoo pendiente de comentar
         self.paused = False
         self.idle_status = lambda: "Escuchando"
 
@@ -41,6 +43,12 @@ class LLMWorker(threading.Thread):
         if not self.paused:
             with self._lock:
                 self._pending.add(kind)
+            self._wake.set()
+
+    def screen_changed(self, title: str, path: str) -> None:
+        if not self.paused:
+            with self._lock:
+                self._screen = (title, path)
             self._wake.set()
 
     def ask(self, question: str) -> None:
@@ -63,6 +71,7 @@ class LLMWorker(threading.Thread):
             with self._lock:  # lo que llegue durante la llamada dispara otra vuelta
                 kinds, self._pending = self._pending, set()
                 questions, self._questions = self._questions, []
+                screen, self._screen = self._screen, None
                 self._wake.clear()
             self._last_call = time.time()
 
@@ -79,8 +88,16 @@ class LLMWorker(threading.Thread):
                                               on_token=self.signals.suggestion_token.emit)
                     print(f"[llm] → {result}" if result else "[llm] NO_ACTION")
                     self._last_suggestion = result or self._last_suggestion
+                if screen:
+                    title, path = screen
+                    note = self.llm.section(title, path,
+                                            on_start=lambda: self.signals.note_start.emit(f"📍 {title}: "),
+                                            on_token=self.signals.note_token.emit)
+                    if note:
+                        print(f"[llm] 📍 {title}: {note}")
                 if "note" in kinds:
-                    note = self.llm.note(self.buffer.snapshot(), on_start=self.signals.note_start.emit,
+                    note = self.llm.note(self.buffer.snapshot(),
+                                         on_start=lambda: self.signals.note_start.emit("📝 "),
                                          on_token=self.signals.note_token.emit)
                     if note:
                         print(f"[llm] 📝 {note}")
@@ -89,6 +106,35 @@ class LLMWorker(threading.Thread):
                 self.signals.status.emit("Error con LM Studio (ver terminal)")
                 continue
             self.signals.status.emit(self.idle_status())
+
+
+class ScreenWatcher(threading.Thread):
+    """Revisa cada 2 s la pestaña activa de Chrome y avisa cuando el usuario cambia de sección de Odoo
+    (y se queda en ella al menos un ciclo, para no comentar pantallas por las que solo pasó)."""
+
+    def __init__(self, on_change):
+        super().__init__(daemon=True, name="screen")
+        self.on_change = on_change
+        self.enabled = True
+        self._stop = threading.Event()
+
+    def stop(self) -> None:
+        self._stop.set()
+
+    def run(self) -> None:
+        last_seen = announced = None
+        while not self._stop.wait(2.0):
+            if not self.enabled:
+                continue
+            screen = active_odoo_screen()
+            if screen is None:
+                continue
+            key = section_key(*screen)
+            if key == last_seen and key != announced:
+                announced = key
+                print(f"[screen] {screen[0]} ({screen[1]})")
+                self.on_change(*screen)
+            last_seen = key
 
 
 def main() -> int:
@@ -156,8 +202,9 @@ def main() -> int:
         signals.transcript.emit("Pregunta", text)
         llm_worker.ask(text)
 
+    screen_watcher = ScreenWatcher(llm_worker.screen_changed)
     workers = [Segmenter(call.queue, THEM, cfg, segments), Transcriber(segments, buffer, cfg, on_sentence),
-               llm_worker]
+               llm_worker, screen_watcher]
     if mic:
         workers.append(Segmenter(mic.queue, ME, cfg, segments))
     for worker in workers:
@@ -196,6 +243,7 @@ def main() -> int:
     controls.call.toggled.connect(toggle_call)
     controls.mic.toggled.connect(toggle_mic)
     controls.copilot.toggled.connect(toggle_copilot)
+    controls.screen.toggled.connect(lambda on: setattr(screen_watcher, "enabled", on))
     controls.clear.triggered.connect(buffer.clear)
     controls.quit.triggered.connect(app.quit)
     signals.ask.connect(ask)
