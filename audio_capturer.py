@@ -56,6 +56,7 @@ class AudioCapturer:
         self._stream: sd.InputStream | None = None
         self.started_at = 0.0
         self.last_signal_at = 0.0  # último bloque que no fue silencio digital absoluto
+        self.level = 0.0  # volumen (RMS) del último bloque, para el medidor del HUD
 
     def _callback(self, indata, frames, time_info, status):
         if status:
@@ -63,6 +64,7 @@ class AudioCapturer:
         mono = indata.mean(axis=1) if indata.ndim > 1 else indata
         if np.any(mono):
             self.last_signal_at = time.time()
+        self.level = float(np.sqrt(np.mean(mono ** 2))) if mono.size else 0.0
         chunk = resample(mono.astype(np.float32), self.src_rate, self.target_rate)
         try:
             self.queue.put_nowait(chunk)
@@ -100,4 +102,5 @@ class AudioCapturer:
             self._stream.stop()
             self._stream.close()
             self._stream = None
+            self.level = 0.0
             print(f"[audio] Detenido '{self.device_name}'")

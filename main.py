@@ -341,6 +341,11 @@ def main() -> int:
             signals.status.emit(status_text())
         silence_warned = silent
 
+    level_timer = QTimer()
+    level_timer.timeout.connect(lambda: hud.set_levels(call.level if call.running else None,
+                                                       mic.level if mic and mic.running else None))
+    level_timer.start(80)
+
     audio_timer = QTimer()
     audio_timer.timeout.connect(check_audio)
     audio_timer.start(2000)

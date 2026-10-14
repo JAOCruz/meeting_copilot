@@ -12,10 +12,11 @@ CURRENT = DIR / "current.json"
 
 
 def load() -> list[list[str]]:
-    """Entradas [tipo, prefijo, texto] de la sesión en curso (vacío si no hay o está dañada)."""
+    """Entradas [tipo, prefijo, texto, hora] de la sesión en curso (vacío si no hay o está dañada).
+    Las sesiones antiguas no guardaban la hora: se rellena con ""."""
     try:
         entries = json.loads(CURRENT.read_text(encoding="utf-8"))["entries"]
-        return [list(e) for e in entries if isinstance(e, list) and len(e) == 3]
+        return [(list(e) + [""])[:4] for e in entries if isinstance(e, list) and len(e) in (3, 4)]
     except (OSError, ValueError, KeyError, TypeError):
         return []
 
