@@ -8,7 +8,7 @@ import time
 from PyQt6.QtCore import QEvent, QObject, QPoint, QSize, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QAction, QColor, QGuiApplication, QIcon
 from PyQt6.QtWidgets import (QButtonGroup, QFrame, QHBoxLayout, QLabel, QLineEdit, QMenu, QSizeGrip,
-                             QSizePolicy, QSystemTrayIcon, QTextBrowser, QToolButton, QVBoxLayout, QWidget)
+                             QScrollArea, QSizePolicy, QSystemTrayIcon, QTextBrowser, QToolButton, QVBoxLayout, QWidget)
 
 import session_store
 import ui_theme as T
@@ -169,7 +169,8 @@ class HudWindow(QWidget):
         # Historial de toda la sesión: lo que se dice, las respuestas y las notas, en orden.
         self.feed = QTextBrowser()
         self.feed.setOpenLinks(False)
-        self.feed.setMinimumHeight(cfg.hud_feed_height)
+        self.feed.setMinimumHeight(140)  # puede encogerse; si no, con la ventana llena se monta sobre el campo de abajo
+        self.feed.document().setDocumentMargin(6)
         self.feed.installEventFilter(self)
         layout.addWidget(self.feed, 1)
         self.new_button = QToolButton(self.feed)
@@ -225,6 +226,8 @@ class HudWindow(QWidget):
         controls.compact.toggled.connect(self.set_compact)
 
         self.set_status("Iniciando…")
+        screen = QGuiApplication.primaryScreen().availableGeometry()
+        self.resize(cfg.hud_width, min(cfg.hud_feed_height + 360, screen.height() - 48))
         self._place_top_right()
 
         # Los ajustes de macOS se aplican antes de mostrar la ventana por primera vez (si no, se queda
@@ -326,7 +329,14 @@ class HudWindow(QWidget):
         self.answer_warning.setTextFormat(Qt.TextFormat.RichText)
         body.addLayout(header)
         body.addWidget(self.answer_context)
-        body.addWidget(self.answer_text)
+        # Respuestas largas se desplazan dentro de la tarjeta en vez de empujar (y tapar) el historial.
+        self.answer_scroll = QScrollArea()
+        self.answer_scroll.setWidget(self.answer_text)
+        self.answer_scroll.setWidgetResizable(True)
+        self.answer_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.answer_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.answer_scroll.setStyleSheet("QScrollArea, QScrollArea > QWidget > QWidget { background: transparent; }")
+        body.addWidget(self.answer_scroll)
         body.addWidget(self.answer_warning)
         row.addLayout(body, 1)
         return self.card
@@ -448,6 +458,7 @@ class HudWindow(QWidget):
             self.answer_text.setText(f"<span style='color:{T.MUTED}; font-size:13px; font-weight:400'>"
                                      "Cuando alguien haga una pregunta, la respuesta aparecerá aquí.</span>")
             self._set_unverified(False)
+            self._fit_answer()
             return
         _, _, raw, at = self._entries[index]
         text, problem = _split_unverified(raw)
@@ -468,8 +479,23 @@ class HudWindow(QWidget):
         self.answer_warning.setText(f"Sin verificar: {html.escape(problem)}. Confírmalo antes de decirlo.")
         self.answer_warning.setVisible(bool(problem))
         self._set_unverified(bool(problem))
+        self._fit_answer()
         if self._controls.compact.isChecked():
             QTimer.singleShot(0, self._fit_compact)
+
+    def _fit_answer(self) -> None:
+        """La tarjeta mide lo que ocupa la respuesta, hasta un tope (~1/4 de la ventana; más en modo compacto)."""
+        width = max(self.answer_scroll.viewport().width(), self.width() - 60)
+        needed = self.answer_text.heightForWidth(width)
+        cap = 320 if self._controls.compact.isChecked() else max(110, self.height() // 4)
+        self.answer_scroll.setFixedHeight(max(24, min(needed, cap)))
+        self.answer_scroll.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded if needed > cap else Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if hasattr(self, "answer_scroll"):
+            self._fit_answer()
 
     def _set_unverified(self, on: bool) -> None:
         for widget in (self.card, self.accent, self.answer_title):
