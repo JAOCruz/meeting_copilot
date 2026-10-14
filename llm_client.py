@@ -8,6 +8,7 @@ from typing import Callable, Iterable
 
 from openai import OpenAI
 
+import providers
 from config import Config
 from transcriber import ME, THEM
 
@@ -138,8 +139,12 @@ class LLMClient:
     def reload(self) -> None:
         """(Re)lee el conocimiento y la URL del servidor desde `cfg`; lo usa la ventana de Configuración."""
         cfg = self.cfg
-        self.client = OpenAI(base_url=cfg.llm_base_url, api_key="lm-studio")
-        knowledge = load_knowledge(cfg.context_path, cfg.context_max_chars)
+        self.conn = providers.connection(cfg)
+        # sin key no se lanza aquí: check_connection lo explica y el HUD sigue abierto para corregirlo
+        self.client = OpenAI(base_url=self.conn.base_url or "http://localhost", api_key=self.conn.api_key or "-",
+                             timeout=30)
+        source = providers.knowledge_source(cfg.context_path, cfg.knowledge_project)
+        knowledge = load_knowledge(str(source), cfg.context_max_chars)
         self.knowledge = knowledge
         # El conocimiento va al principio y nunca cambia: LM Studio reutiliza ese prefijo ya procesado
         # en cada llamada, así que solo la primera paga el costo de leerlo.
@@ -147,7 +152,8 @@ class LLMClient:
             self.system_prompt = (SYSTEM_PROMPT.format(missing_data_rule=MISSING_DATA_KNOWLEDGE)
                                   + KNOWLEDGE_HEADER + knowledge + KNOWLEDGE_FOOTER)
             self.few_shot = FEW_SHOT + FEW_SHOT_KNOWLEDGE
-            print(f"[llm] Conocimiento cargado: {len(knowledge):,} caracteres (~{len(knowledge) // 4:,} tokens)")
+            print(f"[llm] Conocimiento «{cfg.knowledge_project}» ({source.name}): {len(knowledge):,} caracteres "
+                  f"(~{len(knowledge) // 4:,} tokens)")
         else:
             self.system_prompt = SYSTEM_PROMPT.format(missing_data_rule=MISSING_DATA_GENERIC)
             self.few_shot = FEW_SHOT
@@ -157,11 +163,19 @@ class LLMClient:
         return [m.id for m in self.client.models.list().data if "embed" not in m.id.lower()]
 
     def check_connection(self) -> None:
+        if self.conn.info.needs_key and not self.conn.api_key:
+            raise RuntimeError(f"falta la API key de {self.conn.info.label} (Configuración → Copiloto)")
+        if not self.conn.info.local:
+            # una llamada mínima: confirma key, modelo y red (cuesta una fracción de centavo)
+            self.client.chat.completions.create(model=self.conn.model, max_tokens=1,
+                                                messages=[{"role": "user", "content": "ok"}])
+            print(f"[llm] {self.conn.info.label} OK con '{self.conn.model}'. La transcripción y el conocimiento "
+                  "se envían a este proveedor.")
+            return
         models = [m.id for m in self.client.models.list().data]
-        print(f"[llm] LM Studio OK. Modelos cargados: {models}")
-        if self.cfg.llm_model not in models:
-            print(f"[llm] Aviso: '{self.cfg.llm_model}' no aparece en la lista; "
-                  "usa COPILOT_LLM_MODEL con uno de los anteriores.")
+        print(f"[llm] LM Studio OK. Modelos disponibles: {models}")
+        if self.conn.model not in models:
+            print(f"[llm] Aviso: '{self.conn.model}' no aparece en la lista; elige otro en Configuración → Copiloto.")
 
     def _stream(self, user_message: str) -> Iterable[str]:
         messages = [{"role": "system", "content": self.system_prompt}]
@@ -175,7 +189,7 @@ class LLMClient:
                 messages.append({"role": "assistant", "content": ex_note})
         messages.append({"role": "user", "content": user_message})
         stream = self.client.chat.completions.create(
-            model=self.cfg.llm_model,
+            model=self.conn.model,
             messages=messages,
             temperature=self.cfg.llm_temperature,
             max_tokens=self.cfg.llm_max_tokens,
@@ -228,7 +242,10 @@ class LLMClient:
         return self._complete(SECTION_MESSAGE.format(title=title, path=path), on_start, on_token)
 
     def warm_up(self) -> None:
-        """Procesa el prompt del sistema una vez para que la primera pregunta real sea rápida."""
+        """Procesa el prompt del sistema una vez para que la primera pregunta real sea rápida (solo en local:
+        en la nube no hace falta y costaría una llamada)."""
+        if not self.conn.info.local:
+            return
         t0 = time.time()
         for _ in self._stream(build_user_message("(ninguno)", "Hola a todos.")):
             pass

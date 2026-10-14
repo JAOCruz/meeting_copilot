@@ -18,6 +18,8 @@ tu mic ──────────────┘
 | `audio_route.py` + `tools/audio_route.swift` | Crea el dispositivo de salida múltiple (tu salida + BlackHole) y lo activa/desactiva. |
 | `transcriber.py` | Corta frases por silencio en cada fuente, transcribe, descarta el eco del mic y guarda las últimas N. |
 | `llm_client.py` | Prompt del sistema, ejemplos, streaming y filtro de `NO_ACTION`. |
+| `providers.py` | Proveedores del modelo (LM Studio, Claude, otro compatible con OpenAI), API keys en el Llavero y proyectos de conocimiento. |
+| `ui_theme.py` | Paleta, íconos SVG y widgets (interruptor, medidor de nivel). |
 | `hud_gui.py` | HUD PyQt6 con controles + icono en la barra de menú. |
 | `main.py` | Orquesta los hilos y conecta todo al HUD. |
 
@@ -97,13 +99,24 @@ líneas a `inbox.txt` (`/config` abre la Configuración).
 |---|---|
 | Audio | Dispositivo de la llamada y micrófono, ruta automática por BlackHole, sensibilidad |
 | Transcripción | Modelo Whisper, idioma, pausa que cierra una frase |
-| IA | Servidor y modelo de LM Studio (lista los cargados), creatividad, intervalos, qué genera (💬 📝 📍) |
-| Conocimiento | Carpeta de conocimiento y **Actualizar desde aiviber** (exporta un proyecto vía epona) |
+| Copiloto | Proveedor (LM Studio local, Claude u otro compatible con OpenAI), API key, modelo, **Probar conexión**, creatividad, intervalos, qué genera |
+| Conocimiento | **Proyecto de la reunión**, proveedor propio por proyecto, carpeta de conocimiento y **Exportar desde aiviber** |
 | HUD | Opacidad, tamaño de las respuestas, ancho |
 | Sesiones | Reuniones guardadas, exportar a Markdown, nueva sesión |
 
+**Proyectos.** Cada proyecto es un `.md`/`.txt` (o subcarpeta) en `knowledge/`: `knowledge/transport.md`,
+`knowledge/arcova.md`… Solo se carga el del proyecto activo, que se elige en ⚙ → Conocimiento o en el
+menú de la barra superior → **Proyecto** (se aplica al momento). Exportar desde aiviber crea el archivo
+del proyecto y lo deja seleccionado.
+
+**Claude u otra API.** En ⚙ → Copiloto elige el proveedor, pega la API key (se guarda en el Llavero de
+macOS, nunca en `settings.json`; `ANTHROPIC_API_KEY`/`OPENAI_API_KEY` tienen prioridad) y pulsa
+**Probar conexión**. Con un proveedor en la nube la transcripción y el conocimiento salen del Mac: para
+proyectos con datos de clientes, fija en ⚙ → Conocimiento «Proveedor para este proyecto: LM Studio».
+El HUD marca «(nube)» junto al modelo cuando no es local.
+
 Se guarda en `settings.json` (ignorado por git), que tiene prioridad sobre `config.py` y las variables
-de entorno; las opciones de línea de comandos tienen prioridad sobre todo. Los ajustes marcados con ↻
+de entorno; las opciones de línea de comandos tienen prioridad sobre todo. Los ajustes marcados con «Requiere reiniciar»
 se aplican al reiniciar («Guardar y reiniciar»); el resto, al momento.
 
 **Modelo recomendado** en un Mac con 32 GB o más: `Qwen3-30B-A3B-Instruct-2507` (Q4_K_M, ~18 GB):

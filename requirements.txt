@@ -4,3 +4,4 @@ numpy>=1.26
 openai>=1.40
 PyQt6>=6.6
 pyobjc-framework-Cocoa>=10.0   # HUD visible sobre apps en pantalla completa
+keyring

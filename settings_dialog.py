@@ -9,12 +9,13 @@ from pathlib import Path
 
 import sounddevice as sd
 from PyQt6.QtCore import QProcess, QSize, Qt, pyqtSignal
-from PyQt6.QtWidgets import (QComboBox, QDialog, QDoubleSpinBox, QFileDialog, QFrame, QHBoxLayout, QLabel,
+from PyQt6.QtWidgets import (QApplication, QComboBox, QDialog, QDoubleSpinBox, QFileDialog, QFrame, QHBoxLayout, QLabel,
                              QLineEdit, QListWidget, QListWidgetItem, QMessageBox, QPlainTextEdit, QPushButton,
                              QScrollArea, QSizePolicy, QSpinBox, QStackedWidget, QVBoxLayout, QWidget)
 
 import session_store
 import settings_store
+import providers
 import ui_theme as T
 from audio_capturer import find_device
 from config import Config
@@ -374,12 +375,19 @@ class SettingsDialog(QDialog):
     def _status_page(self) -> QWidget:
         page, layout = self._page("Estado", "Cómo está funcionando el copiloto ahora mismo.")
         group = self._section(layout)
-        lm = (f"Conectado, {len(self._lm_models)} modelos" if not self._lm_error
-              else f"Sin conexión: {self._lm_error[:70]}")
-        group.add(self._row("LM Studio", self.cfg.llm_base_url, self._value_label(lm, muted=bool(self._lm_error))))
-        group.add(self._row("Modelo", "El que genera respuestas y notas.", self._value_label(self.cfg.llm_model)))
-        knowledge = load_knowledge(self.cfg.context_path, 10**9)
-        group.add(self._row("Conocimiento", f"Carpeta «{self.cfg.context_path}»",
+        conn = providers.connection(self.cfg)
+        if conn.info.local:
+            lm = (f"Conectado, {len(self._lm_models)} modelos" if not self._lm_error
+                  else f"Sin conexión: {self._lm_error[:70]}")
+            group.add(self._row("LM Studio", self.cfg.llm_base_url, self._value_label(lm, muted=bool(self._lm_error))))
+        else:
+            group.add(self._row("Proveedor", "La transcripción y el conocimiento salen de tu Mac.",
+                                self._value_label(conn.info.label + ("" if conn.api_key else ", sin API key"),
+                                                  muted=not conn.api_key)))
+        group.add(self._row("Modelo", "El que genera respuestas y notas.", self._value_label(conn.model)))
+        knowledge = load_knowledge(str(providers.knowledge_source(self.cfg.context_path, self.cfg.knowledge_project)),
+                                   10**9)
+        group.add(self._row("Conocimiento", f"Proyecto «{self.cfg.knowledge_project}»",
                             self._value_label(f"{knowledge.count(chr(10) + '[')} notas, ~{len(knowledge) // 4:,} tokens"
                                               if knowledge else "Sin conocimiento", muted=not knowledge)))
         language = dict((v, k) for k, v in LANGUAGES).get(self.cfg.whisper_language, self.cfg.whisper_language)
@@ -440,22 +448,29 @@ class SettingsDialog(QDialog):
         return page
 
     def _ai_page(self) -> QWidget:
-        page, layout = self._page("Copiloto", "El modelo de LM Studio y qué genera durante la llamada.")
+        page, layout = self._page("Copiloto", "Qué modelo responde y qué genera durante la llamada.")
+        self.w_provider = self._combo([(p.label, key) for key, p in providers.PROVIDERS.items()],
+                                      self.cfg.llm_provider)
         self.w_url = QLineEdit(self.cfg.llm_base_url)
         self.w_url.setFixedWidth(CONTROL_WIDTH)
         self.w_model = self._combo([(self.cfg.llm_model, self.cfg.llm_model)], self.cfg.llm_model, editable=True)
         self.w_model.setFixedWidth(CONTROL_WIDTH - 40)
-        refresh = QPushButton()
-        refresh.setIcon(T.icon("refresh", T.TEXT, 15))
-        refresh.setToolTip("Buscar modelos en LM Studio")
-        refresh.setFixedWidth(34)
-        refresh.setCursor(Qt.CursorShape.PointingHandCursor)
-        refresh.clicked.connect(self._refresh_models)
+        refresh = self._icon_button("refresh", "Buscar modelos en LM Studio", self._refresh_models)
         self.w_model_status = self._hint("")
         model_row = QHBoxLayout()
         model_row.setSpacing(6)
         model_row.addWidget(self.w_model)
         model_row.addWidget(refresh)
+        claude = providers.PROVIDERS["claude"]
+        self.w_claude_key = self._key_field("claude")
+        self.w_claude_model = self._combo([(m, m) for m in claude.models], self.cfg.claude_model, editable=True)
+        self.w_custom_url = QLineEdit(self.cfg.custom_base_url)
+        self.w_custom_url.setPlaceholderText("https://api.openai.com/v1")
+        self.w_custom_url.setFixedWidth(CONTROL_WIDTH)
+        self.w_custom_key = self._key_field("openai")
+        self.w_custom_model = QLineEdit(self.cfg.custom_model)
+        self.w_custom_model.setPlaceholderText("p. ej. gpt-5-mini")
+        self.w_custom_model.setFixedWidth(CONTROL_WIDTH)
         self.w_temperature = self._spin(self.cfg.llm_temperature, 0.0, 1.0, 0.05, decimals=2)
         self.w_max_tokens = self._spin(self.cfg.llm_max_tokens, 40, 600, 20, suffix="tokens")
         self.w_cooldown = self._spin(self.cfg.llm_cooldown_seconds, 0.5, 30.0, 0.5, decimals=1, suffix="s")
@@ -464,15 +479,46 @@ class SettingsDialog(QDialog):
         self.w_notes = self._switch(self.cfg.notes_enabled)
         self.w_screen = self._switch(self.cfg.screen_notes_enabled)
 
-        model = self._section(layout, "Modelo")
-        model.add(self._row("Servidor", "LM Studio → Developer → Start Server.", self.w_url))
-        model_widget = self._row("Modelo", "", model_row)
-        model.add(model_widget)
-        model_widget.layout().itemAt(0).layout().addWidget(self.w_model_status)
+        chooser = self._section(layout, "Proveedor")
+        test = self._button("Probar conexión", "pulse")
+        test.clicked.connect(self._test_connection)
+        self.w_provider_note = self._hint("")
+        provider = self._row("Proveedor predeterminado", "", self.w_provider)
+        provider.layout().itemAt(0).layout().addWidget(self.w_provider_note)
+        chooser.add(provider)
+        self.w_test_result = self._hint("")
+        check = self._row("Comprobar", "Hace una consulta mínima con lo que hay escrito, aunque no esté guardado.",
+                          test)
+        check.layout().itemAt(0).layout().addWidget(self.w_test_result)
+        chooser.add(check)
+
+        # Un grupo por proveedor; solo se ve el del proveedor elegido.
+        self._provider_groups = {}
+        lm = self._section(layout)
+        lm.add(self._row("Servidor", "LM Studio → Developer → Start Server.", self.w_url))
+        lm_model = self._row("Modelo", "", model_row)
+        lm_model.layout().itemAt(0).layout().addWidget(self.w_model_status)
+        lm.add(lm_model)
+        self._provider_groups["lmstudio"] = lm
+        cl = self._section(layout)
+        cl.add(self._row("API key", "Se guarda en el Llavero de macOS, no en archivos. Créala en "
+                         "console.anthropic.com.", self.w_claude_key))
+        cl.add(self._row("Modelo", "Haiku: rápido y barato, ideal para reuniones. Sonnet: más preciso.",
+                         self.w_claude_model))
+        self._provider_groups["claude"] = cl
+        other = self._section(layout)
+        other.add(self._row("Servidor", "Cualquier API compatible con OpenAI: OpenAI, OpenRouter, Groq…",
+                            self.w_custom_url))
+        other.add(self._row("API key", "Se guarda en el Llavero de macOS, no en archivos.", self.w_custom_key))
+        other.add(self._row("Modelo", "", self.w_custom_model))
+        self._provider_groups["openai"] = other
+        self.w_provider.currentIndexChanged.connect(self._on_provider_changed)
+        self._on_provider_changed()
+
+        model = self._section(layout, "Respuestas")
         model.add(self._row("Creatividad", "Baja es más fiel al conocimiento (recomendado 0.1–0.3).",
                             self.w_temperature))
         model.add(self._row("Largo máximo", "Respuestas más cortas llegan antes.", self.w_max_tokens))
-
         output = self._section(layout, "Qué genera")
         output.add(self._row("Respuestas a preguntas", "Cuando alguien de la llamada pregunta algo, propone qué "
                              "contestar.", self.w_answers))
@@ -488,16 +534,17 @@ class SettingsDialog(QDialog):
         return page
 
     def _knowledge_page(self) -> QWidget:
-        page, layout = self._page("Conocimiento", "Lo que el copiloto sabe de tu proyecto. Se incluye en cada "
-                                  "consulta al modelo.")
+        page, layout = self._page("Conocimiento", "Lo que el copiloto sabe de cada proyecto. Elige el proyecto de "
+                                  "la reunión: solo se carga su conocimiento.")
+        self._project_providers = dict(self.cfg.project_providers)
+        self.w_project_active = QComboBox()
+        self.w_project_active.setFixedWidth(CONTROL_WIDTH)
+        self.w_project_info = self._hint("")
+        self.w_project_provider = self._combo(
+            [("Usar el predeterminado", "")] + [(p.label, key) for key, p in providers.PROVIDERS.items()], "")
         self.w_context = QLineEdit(self.cfg.context_path)
         self.w_context.setFixedWidth(CONTROL_WIDTH - 40)
-        choose = QPushButton()
-        choose.setIcon(T.icon("folder", T.TEXT, 15))
-        choose.setToolTip("Elegir carpeta…")
-        choose.setFixedWidth(34)
-        choose.setCursor(Qt.CursorShape.PointingHandCursor)
-        choose.clicked.connect(self._choose_knowledge)
+        choose = self._icon_button("folder", "Elegir carpeta…", self._choose_knowledge)
         path_row = QHBoxLayout()
         path_row.setSpacing(6)
         path_row.addWidget(self.w_context)
@@ -505,7 +552,7 @@ class SettingsDialog(QDialog):
         self.w_knowledge_info = self._hint("")
         self.w_project = QLineEdit(self.cfg.knowledge_project)
         self.w_project.setFixedWidth(CONTROL_WIDTH - 126)
-        update = self._button("Actualizar", "refresh")
+        update = self._button("Exportar", "refresh")
         update.setFixedWidth(120)
         update.clicked.connect(self._update_knowledge)
         project_row = QHBoxLayout()
@@ -513,21 +560,47 @@ class SettingsDialog(QDialog):
         project_row.addWidget(self.w_project)
         project_row.addWidget(update)
 
-        group = self._section(layout)
-        source = self._row("Carpeta o archivo", "", path_row)
-        source.layout().itemAt(0).layout().addWidget(self.w_knowledge_info)
-        group.add(source)
-        group.add(self._row("Proyecto de aiviber", "Exporta sus notas (vía epona) a knowledge/<proyecto>.md. "
-                            "Tarda unos 2 minutos y omite las notas técnicas.", project_row))
+        active = self._section(layout, "Reunión")
+        project = self._row("Proyecto", "", self.w_project_active)
+        project.layout().itemAt(0).layout().addWidget(self.w_project_info)
+        active.add(project)
+        active.add(self._row("Proveedor para este proyecto", "Por ejemplo, un proyecto con datos de clientes "
+                             "siempre en local y los demás con Claude.", self.w_project_provider))
+        sources = self._section(layout, "Fuentes")
+        folder = self._row("Carpeta de conocimiento", "Un .md o .txt (o una subcarpeta) por proyecto.", path_row)
+        folder.layout().itemAt(0).layout().addWidget(self.w_knowledge_info)
+        sources.add(folder)
+        sources.add(self._row("Exportar desde aiviber", "Guarda las notas del proyecto (vía epona) como "
+                              "knowledge/<proyecto>.md. Tarda unos 2 minutos y omite las notas técnicas.",
+                              project_row))
         self.w_export_log = QPlainTextEdit()
         self.w_export_log.setReadOnly(True)
-        self.w_export_log.setMinimumHeight(150)
-        self.w_export_log.setPlaceholderText("Aquí aparece el progreso cuando actualizas desde aiviber.")
+        self.w_export_log.setMinimumHeight(120)
+        self.w_export_log.setPlaceholderText("Aquí aparece el progreso cuando exportas desde aiviber.")
         layout.addSpacing(10)
         layout.addWidget(self.w_export_log, 1)
-        self.w_context.textChanged.connect(self._show_knowledge_info)
-        self._show_knowledge_info()
+        self.w_context.textChanged.connect(self._refresh_projects)
+        self.w_project_active.currentIndexChanged.connect(self._on_project_changed)
+        self.w_project_provider.currentIndexChanged.connect(self._on_project_provider_changed)
+        self._refresh_projects()
         return page
+
+    def _icon_button(self, icon_name: str, tip: str, slot) -> QPushButton:
+        button = QPushButton()
+        button.setIcon(T.icon(icon_name, T.TEXT, 15))
+        button.setToolTip(tip)
+        button.setFixedWidth(34)
+        button.setCursor(Qt.CursorShape.PointingHandCursor)
+        button.clicked.connect(slot)
+        return button
+
+    def _key_field(self, provider: str) -> QLineEdit:
+        field = QLineEdit()
+        field.setEchoMode(QLineEdit.EchoMode.Password)
+        field.setFixedWidth(CONTROL_WIDTH)
+        stored = bool(providers.get_key(provider))
+        field.setPlaceholderText("Guardada · escribe para cambiarla" if stored else "Pega aquí tu API key")
+        return field
 
     def _hud_page(self) -> QWidget:
         page, layout = self._page("HUD", "La ventana flotante que ves durante la llamada.")
@@ -563,7 +636,12 @@ class SettingsDialog(QDialog):
         return page
 
     def _update_app_status(self) -> None:
-        if self._lm_error:
+        conn = providers.connection(self.cfg)
+        if not conn.info.local:
+            ok = bool(conn.api_key)
+            self.app_status.setText(f"Usando {conn.info.label.split(' (')[0]}" if ok else "Falta la API key")
+            self.app_status.setStyleSheet(f"color: {T.TEAL if ok else T.RED};")
+        elif self._lm_error:
             self.app_status.setText("LM Studio sin conexión")
             self.app_status.setStyleSheet(f"color: {T.RED};")
         else:
@@ -593,8 +671,8 @@ class SettingsDialog(QDialog):
             self.w_model.setCurrentIndex(index)
         else:
             self.w_model.setEditText(current)
-        self.w_model_status.setText(f"{len(models)} modelo(s) en LM Studio. "
-                                    "Recomendado: Qwen3-30B-A3B-Instruct-2507.")
+        self.w_model_status.setText(f"{len(models)} modelo(s) en LM Studio.")
+        self.w_model.lineEdit().setCursorPosition(0)
 
     def _choose_knowledge(self) -> None:
         start = str(ROOT / self.w_context.text()) if not Path(self.w_context.text()).is_absolute() \
@@ -607,16 +685,94 @@ class SettingsDialog(QDialog):
                 pass
             self.w_context.setText(folder)
 
-    def _show_knowledge_info(self) -> None:
-        text = load_knowledge(self.w_context.text().strip() or "knowledge", 10**9)
+    def _refresh_projects(self) -> None:
+        """Rellena «Proyecto» con los de la carpeta de conocimiento (conserva el elegido si sigue existiendo)."""
+        folder = self.w_context.text().strip() or "knowledge"
+        names = providers.list_projects(folder)
+        current = self.w_project_active.currentText() or self.cfg.knowledge_project
+        self.w_project_active.blockSignals(True)
+        self.w_project_active.clear()
+        self.w_project_active.addItems(names)
+        if current in names:
+            self.w_project_active.setCurrentText(current)
+        self.w_project_active.blockSignals(False)
+        self.w_knowledge_info.setText(f"{len(names)} proyecto(s): {', '.join(names)}" if names
+                                      else "No hay proyectos: exporta uno desde aiviber o añade un .md.")
+        self._on_project_changed()
+
+    def _on_project_changed(self) -> None:
+        name = self.w_project_active.currentText()
+        source = providers.knowledge_source(self.w_context.text().strip() or "knowledge", name)
+        text = load_knowledge(str(source), 10**9) if name else ""
         if not text:
-            self.w_knowledge_info.setText("Sin conocimiento: el copiloto responderá de forma genérica.")
+            self.w_project_info.setText("Sin conocimiento: el copiloto responderá de forma genérica.")
+        else:
+            limit = self.cfg.context_max_chars
+            extra = f", se recorta a {limit:,} caracteres" if len(text) > limit else ""
+            self.w_project_info.setText(f"{text.count(chr(10) + '[')} notas, ~{len(text) // 4:,} tokens{extra}")
+        self.w_project_provider.blockSignals(True)
+        index = self.w_project_provider.findData(self._project_providers.get(name, ""))
+        self.w_project_provider.setCurrentIndex(max(index, 0))
+        self.w_project_provider.blockSignals(False)
+        if name:
+            self.w_project.setText(name)
+
+    def _on_project_provider_changed(self) -> None:
+        name, value = self.w_project_active.currentText(), self.w_project_provider.currentData()
+        if not name:
             return
-        notes = text.count("\n[")  # cada nota exportada de aiviber empieza con [proyecto.clave | …]
-        limit = self.cfg.context_max_chars
-        extra = f" · se recorta a {limit:,}" if len(text) > limit else ""
-        self.w_knowledge_info.setText(f"{len(text):,} caracteres (~{len(text) // 4:,} tokens) · "
-                                      f"{notes} notas{extra}")
+        if value:
+            self._project_providers[name] = value
+        else:
+            self._project_providers.pop(name, None)
+
+    def _on_provider_changed(self) -> None:
+        key = self.w_provider.currentData()
+        for name, group in self._provider_groups.items():
+            group.setVisible(name == key)
+        info = providers.PROVIDERS[key]
+        self.w_provider_note.setText("Todo se queda en tu Mac." if info.local else
+                                     f"La transcripción y el conocimiento se envían a {info.label.split(' (')[0]}.")
+        self.w_test_result.setText("")
+        self.w_test_result.setVisible(False)
+
+    def _form_connection(self) -> providers.Connection:
+        """La conexión tal como está escrita en el formulario (aún sin guardar)."""
+        key = self.w_provider.currentData()
+        if key == "claude":
+            return providers.Connection(key, providers.CLAUDE_URL, self._value(self.w_claude_model),
+                                        self.w_claude_key.text().strip() or providers.get_key(key))
+        if key == "openai":
+            return providers.Connection(key, self.w_custom_url.text().strip(), self.w_custom_model.text().strip(),
+                                        self.w_custom_key.text().strip() or providers.get_key(key))
+        return providers.Connection(key, self.w_url.text().strip(), self.w_model.currentText().strip(), "lm-studio")
+
+    def _test_connection(self) -> None:
+        conn = self._form_connection()
+        if conn.info.needs_key and not conn.api_key:
+            self._show_test(False, "Falta la API key.")
+            return
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            client = OpenAI(base_url=conn.base_url, api_key=conn.api_key, timeout=15)
+            if conn.info.local:
+                ids = [m.id for m in client.models.list().data]
+                ok = conn.model in ids
+                self._show_test(ok, f"Conectado. «{conn.model}» disponible." if ok
+                                else f"Conectado, pero «{conn.model}» no está en LM Studio.")
+            else:
+                client.chat.completions.create(model=conn.model, max_tokens=1,
+                                               messages=[{"role": "user", "content": "ok"}])
+                self._show_test(True, f"Conectado. «{conn.model}» responde.")
+        except Exception as exc:
+            self._show_test(False, f"No conecta: {str(exc)[:160]}")
+        finally:
+            QApplication.restoreOverrideCursor()
+
+    def _show_test(self, ok: bool, text: str) -> None:
+        self.w_test_result.setVisible(True)
+        self.w_test_result.setText(text)
+        self.w_test_result.setStyleSheet(f"color: {T.TEAL if ok else T.RED};")
 
     def _update_knowledge(self) -> None:
         if self._process and self._process.state() != QProcess.ProcessState.NotRunning:
@@ -642,10 +798,13 @@ class SettingsDialog(QDialog):
         self.w_export_log.verticalScrollBar().setValue(self.w_export_log.verticalScrollBar().maximum())
 
     def _on_export_finished(self, code: int) -> None:
-        self.w_export_log.appendPlainText("✓ Listo. Pulsa Guardar para que el copiloto use el conocimiento nuevo."
+        self.w_export_log.appendPlainText("✓ Listo. Pulsa Guardar para usarlo en la reunión."
                                           if code == 0 else f"✗ Falló (código {code}).")
+        exported = self.w_project.text().strip()
         self.w_context.setText("knowledge")
-        self._show_knowledge_info()
+        self._refresh_projects()
+        if code == 0 and self.w_project_active.findText(exported) >= 0:
+            self.w_project_active.setCurrentText(exported)  # la reunión pasa a usar lo recién exportado
         self._knowledge_refreshed = code == 0
 
     def _refresh_sessions(self) -> None:
@@ -693,6 +852,11 @@ class SettingsDialog(QDialog):
             "whisper_model": self._value(self.w_whisper),
             "whisper_language": self._value(self.w_language),
             "silence_duration": self.w_silence_duration.value(),
+            "llm_provider": self.w_provider.currentData(),
+            "claude_model": self._value(self.w_claude_model),
+            "custom_base_url": self.w_custom_url.text().strip(),
+            "custom_model": self.w_custom_model.text().strip(),
+            "project_providers": dict(self._project_providers),
             "llm_base_url": self.w_url.text().strip(),
             "llm_model": self.w_model.currentText().strip(),
             "llm_temperature": self.w_temperature.value(),
@@ -703,7 +867,7 @@ class SettingsDialog(QDialog):
             "notes_enabled": self.w_notes.isChecked(),
             "screen_notes_enabled": self.w_screen.isChecked(),
             "context_path": self.w_context.text().strip() or "knowledge",
-            "knowledge_project": self.w_project.text().strip() or "transport",
+            "knowledge_project": self.w_project_active.currentText() or self.cfg.knowledge_project,
             "hud_opacity": self.w_opacity.value(),
             "hud_font_size": self.w_font.value(),
             "hud_width": self.w_width.value(),
@@ -715,6 +879,10 @@ class SettingsDialog(QDialog):
                    if getattr(self.cfg, name) != value and not _same_device(name, getattr(self.cfg, name), value)}
         if getattr(self, "_knowledge_refreshed", False):
             changed.add("context_path")  # mismo nombre de carpeta, contenido nuevo
+        for provider, field in (("claude", self.w_claude_key), ("openai", self.w_custom_key)):
+            if field.text().strip():  # al Llavero, nunca a settings.json
+                providers.set_key(provider, field.text().strip())
+                changed.add("api_key")
         settings_store.apply(self.cfg, values)
         settings_store.save(self.cfg)
         pending = changed & settings_store.RESTART_REQUIRED

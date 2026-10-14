@@ -6,7 +6,7 @@ import sys
 import time
 
 from PyQt6.QtCore import QEvent, QObject, QPoint, QSize, Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import QAction, QColor, QGuiApplication, QIcon
+from PyQt6.QtGui import QAction, QActionGroup, QColor, QGuiApplication, QIcon
 from PyQt6.QtWidgets import (QButtonGroup, QFrame, QHBoxLayout, QLabel, QLineEdit, QMenu, QSizeGrip,
                              QScrollArea, QSizePolicy, QSystemTrayIcon, QTextBrowser, QToolButton, QVBoxLayout, QWidget)
 
@@ -33,6 +33,7 @@ class HudSignals(QObject):
     note_start = pyqtSignal(str)  # prefijo: "📝 " (comentario) o "📍 <pantalla>: "
     note_token = pyqtSignal(str)
     ask = pyqtSignal(str)  # pregunta escrita en el HUD
+    model = pyqtSignal(str)  # «proyecto · modelo» activos, tras conectar o cambiar de proyecto
 
 
 class Controls(QObject):
@@ -56,6 +57,7 @@ class Controls(QObject):
                                toolTip="Modo compacto: solo la respuesta (o doble clic en la cabecera)")
         self.toggle_hud = QAction("Mostrar/ocultar HUD", self)
         self.quit = QAction("Salir del copiloto", self)
+        self.project_menu = QMenu("Proyecto")  # lo rellena populate_projects
         for action in self.findChildren(QAction):
             action.setIconVisibleInMenu(False)  # el menú de la barra superior queda nativo, solo texto
 
@@ -104,7 +106,7 @@ QLineEdit:focus {{ border-color: {T.INK}; }}
 
 def _status_color(text: str) -> str:
     lowered = text.lower()
-    if any(word in lowered for word in ("error", "no llega", "no hay")):
+    if any(word in lowered for word in ("error", "no llega", "no hay", "sin conexión")):
         return T.RED
     if lowered.startswith(("analizando", "aplicando", "iniciando")):
         return T.INK
@@ -200,7 +202,7 @@ class HudWindow(QWidget):
         self._entries: list[list[str]] = session_store.load()
         self._filter = "all"
         self._answer_font = cfg.hud_font_size
-        self._model = cfg.llm_model
+        self._model = ""
         # Pegado al fondo: si el usuario está abajo, los mensajes nuevos lo mantienen abajo; si sube,
         # se suelta y no se le mueve; si vuelve a bajar hasta el final, se pega otra vez.
         self._follow = True
@@ -215,6 +217,7 @@ class HudWindow(QWidget):
         QTimer.singleShot(0, self._show_restored)
 
         signals.status.connect(self.set_status)
+        signals.model.connect(self._set_model)
         signals.transcript.connect(self._on_transcript)
         signals.suggestion_start.connect(lambda: self._add("answer", "💬 ", ""))
         signals.suggestion_token.connect(self._append_token)
@@ -379,7 +382,6 @@ class HudWindow(QWidget):
         """Aplica en vivo los ajustes visuales de la ventana de Configuración."""
         self.setWindowOpacity(cfg.hud_opacity)
         self._answer_font = cfg.hud_font_size
-        self._model = cfg.llm_model
         self.resize(cfg.hud_width, self.height())
         self._update_card()
         self._schedule()
@@ -505,9 +507,13 @@ class HudWindow(QWidget):
                 widget.style().polish(widget)
         self.answer_title.setText("Respuesta sin verificar" if on else "Respuesta")
 
+    def _set_model(self, text: str) -> None:
+        self._model = text
+        self.model_label.setText(self._short_model())
+        self.model_label.setToolTip(text)
+
     def _short_model(self) -> str:
-        name = self._model.split("/")[-1]
-        return name if len(name) <= 30 else name[:29] + "…"
+        return self._model if len(self._model) <= 42 else self._model[:41] + "…"
 
     # ------------------------------------------------------------------ historial
     def _set_filter(self, key: str) -> None:
@@ -626,6 +632,7 @@ def create_tray(controls: Controls, parent: QObject) -> QSystemTrayIcon:
     menu = QMenu()
     menu.addAction(controls.toggle_hud)
     menu.addAction(controls.compact)
+    menu.addMenu(controls.project_menu)
     menu.addSeparator()
     for action in (controls.call, controls.mic, controls.copilot, controls.screen):
         menu.addAction(action)
@@ -640,6 +647,24 @@ def create_tray(controls: Controls, parent: QObject) -> QSystemTrayIcon:
     tray.show()
     tray.menu_ref = menu  # el menú no tiene padre: evita que Python lo recolecte
     return tray
+
+
+def populate_projects(menu: QMenu, projects, current, on_pick) -> None:
+    """Submenú «Proyecto» con un elemento por proyecto de conocimiento; se rehace al abrirlo, así aparecen
+    los que se acaben de exportar."""
+    def rebuild() -> None:
+        menu.clear()
+        group = QActionGroup(menu)
+        names = projects()
+        for name in names:
+            action = QAction(name, menu, checkable=True, checked=name == current())
+            action.triggered.connect(lambda _=False, n=name: on_pick(n))
+            group.addAction(action)
+            menu.addAction(action)
+        if not names:
+            menu.addAction(QAction("No hay proyectos en la carpeta de conocimiento", menu, enabled=False))
+    menu.aboutToShow.connect(rebuild)
+    rebuild()
 
 
 def bring_to_front(widget: QWidget) -> None:

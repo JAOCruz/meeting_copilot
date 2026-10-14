@@ -15,7 +15,9 @@ from audio_capturer import AudioCapturer, list_input_devices
 from audio_route import set_route
 from config import Config
 import settings_store
-from hud_gui import Controls, HudSignals, HudWindow, bring_to_front, create_tray, make_accessory_app
+from hud_gui import (Controls, HudSignals, HudWindow, bring_to_front, create_tray, make_accessory_app,
+                     populate_projects)
+from providers import list_projects
 from settings_dialog import SettingsDialog
 from llm_client import LLMClient
 from screen_context import active_odoo_screen, section_key
@@ -115,9 +117,23 @@ class LLMWorker(threading.Thread):
                         self._last_note, self._last_note_at = note, time.time()
             except Exception as exc:  # LM Studio caído, modelo no cargado, etc.
                 print(f"[llm] Error: {exc}")
-                self.signals.status.emit("Error con LM Studio (ver terminal)")
+                self.signals.status.emit(f"Error con {self.llm.conn.info.label} (ver terminal)")
                 continue
             self.signals.status.emit(self.idle_status())
+
+
+# Ajustes que obligan a reconectar el modelo o recargar el conocimiento.
+LLM_SETTINGS = {"llm_provider", "llm_base_url", "llm_model", "claude_model", "custom_base_url", "custom_model",
+                "project_providers", "knowledge_project", "context_path", "context_max_chars", "api_key"}
+
+
+def connection_problem(llm: LLMClient, exc: Exception) -> str:
+    """Explica en la terminal por qué no conecta el modelo y devuelve el texto corto para el HUD."""
+    info = llm.conn.info
+    hint = ("Abre LM Studio → Developer → Start Server, con el modelo cargado." if info.local
+            else "Revisa la API key y el modelo en Configuración → Copiloto.")
+    print(f"[llm] No se pudo usar {info.label} ({llm.conn.model}): {exc}\n      {hint}")
+    return f"Sin conexión con {info.label} · abre ⚙"
 
 
 class ScreenWatcher(threading.Thread):
@@ -185,13 +201,13 @@ def main() -> int:
     make_accessory_app()
 
     llm = LLMClient(cfg)
+    llm_error = ""
     try:
         llm.check_connection()
         llm.warm_up()
     except Exception as exc:
-        print(f"[llm] No se pudo conectar a {cfg.llm_base_url}: {exc}\n"
-              "      Abre LM Studio → Developer → Start Server, con el modelo cargado.")
-        return 1
+        # El copiloto abre igual: desde ⚙ se puede cambiar de proveedor, poner la key o arrancar LM Studio.
+        llm_error = connection_problem(llm, exc)
 
     call = AudioCapturer(cfg.audio_device, cfg.target_sample_rate)
     try:
@@ -231,6 +247,9 @@ def main() -> int:
         if speaker in (THEM, ME):
             buffer.add(speaker, text)  # el LLM recupera el contexto de la sesión guardada
     tray = create_tray(controls, app)
+
+    def model_text() -> str:
+        return f"{cfg.knowledge_project} · {llm.conn.label}" if llm.knowledge else llm.conn.label
 
     def status_text() -> str:
         sources = [name for name, cap in (("llamada", call), ("tu mic", mic)) if cap and cap.running]
@@ -276,17 +295,29 @@ def main() -> int:
             return
         hud.apply_appearance(cfg)
         controls.screen.setChecked(cfg.screen_notes_enabled)
-        if changed & {"llm_base_url", "context_path", "context_max_chars", "llm_model"}:
-            def reload_llm() -> None:
-                try:
-                    llm.reload()
-                    llm.warm_up()
-                    signals.status.emit(f"Configuración aplicada · {status_text()}")
-                except Exception as exc:
-                    print(f"[llm] Error al aplicar la configuración: {exc}")
-                    signals.status.emit("Error con LM Studio tras el cambio (ver terminal)")
-            signals.status.emit("Aplicando configuración…")
-            threading.Thread(target=reload_llm, daemon=True).start()
+        if changed & LLM_SETTINGS:
+            reload_llm("Configuración aplicada")
+
+    def reload_llm(done: str) -> None:
+        """Vuelve a leer proveedor, modelo y conocimiento (en segundo plano: puede tardar unos segundos)."""
+        def work() -> None:
+            try:
+                llm.reload()
+                llm.check_connection()
+                llm.warm_up()
+                signals.model.emit(model_text())
+                signals.status.emit(f"{done} · {status_text()}")
+            except Exception as exc:
+                signals.model.emit(model_text())
+                signals.status.emit(connection_problem(llm, exc))
+        signals.status.emit("Aplicando configuración…")
+        threading.Thread(target=work, daemon=True).start()
+
+    def pick_project(name: str) -> None:
+        cfg.knowledge_project = name
+        settings_store.save(cfg)
+        print(f"[config] Proyecto activo: {name}")
+        reload_llm(f"Proyecto {name}")
 
     def open_settings() -> None:
         nonlocal settings_window
@@ -296,6 +327,8 @@ def main() -> int:
         bring_to_front(settings_window)
 
     controls.settings.triggered.connect(open_settings)
+    populate_projects(controls.project_menu, lambda: list_projects(cfg.context_path),
+                      lambda: cfg.knowledge_project, pick_project)
     controls.quit.triggered.connect(app.quit)
     signals.ask.connect(ask)
 
@@ -326,7 +359,8 @@ def main() -> int:
         mic.start()
     hud.show()
     controls.screen.setChecked(cfg.screen_notes_enabled)
-    signals.status.emit(status_text())
+    signals.model.emit(model_text())
+    signals.status.emit(llm_error or status_text())
 
     silence_warned = False
 

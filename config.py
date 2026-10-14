@@ -33,7 +33,13 @@ class Config:
     # --- Búfer de transcripción ---
     buffer_max_sentences: int = 12
 
-    # --- LLM (LM Studio) ---
+    # --- LLM ---
+    llm_provider: str = "lmstudio"            # predeterminado: lmstudio | claude | openai (ver providers.py)
+    project_providers: dict = field(default_factory=dict)  # proyecto → proveedor propio (p. ej. transport → lmstudio)
+    claude_model: str = "claude-haiku-5-5"
+    custom_base_url: str = ""                 # "Otro compatible con OpenAI" (OpenAI, OpenRouter, Groq…)
+    custom_model: str = ""
+    # LM Studio
     llm_base_url: str = field(default_factory=lambda: _env("COPILOT_LLM_URL", "http://localhost:1234/v1"))
     llm_model: str = field(default_factory=lambda: _env("COPILOT_LLM_MODEL", "qwen2.5-coder-7b-instruct"))
     llm_temperature: float = 0.2
@@ -43,8 +49,8 @@ class Config:
     notes_enabled: bool = True                # 📝 comentarios sobre lo que se habla
     screen_notes_enabled: bool = True         # 📍 notas sobre la pantalla de Odoo abierta en Chrome
     note_interval_seconds: float = 8.0        # mínimo entre comentarios 📝
-    knowledge_project: str = "transport"      # proyecto de aiviber que exporta "Actualizar desde aiviber"
-    # Conocimiento del proyecto (.md/.txt) que se incluye en el prompt; ver tools/export_epona_context.py
+    knowledge_project: str = "transport"      # proyecto activo: knowledge/<proyecto>.md (o carpeta)
+    # Carpeta con un .md/.txt (o subcarpeta) por proyecto; ver providers.py y tools/export_epona_context.py
     context_path: str = field(default_factory=lambda: _env("COPILOT_CONTEXT", "knowledge"))
     context_max_chars: int = 90_000           # ~22k tokens; el modelo tiene 32k cargados
 
