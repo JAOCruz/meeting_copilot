@@ -9,6 +9,7 @@ from pathlib import Path
 
 DIR = Path(__file__).parent / "sessions"
 CURRENT = DIR / "current.json"
+PROJECT = ""  # proyecto activo (main.py lo fija): Jarvis lo usa para saber de qué era cada reunión
 
 
 def load() -> list[list[str]]:
@@ -24,7 +25,8 @@ def load() -> list[list[str]]:
 def save(entries: list[list[str]]) -> None:
     DIR.mkdir(exist_ok=True)
     tmp = CURRENT.with_suffix(".tmp")
-    tmp.write_text(json.dumps({"saved_at": time.strftime("%Y-%m-%d %H:%M:%S"), "entries": entries},
+    tmp.write_text(json.dumps({"saved_at": time.strftime("%Y-%m-%d %H:%M:%S"), "project": PROJECT,
+                              "entries": entries},
                               ensure_ascii=False, indent=0), encoding="utf-8")
     tmp.replace(CURRENT)  # escritura atómica: un cierre a mitad no deja el archivo roto
 

@@ -14,6 +14,7 @@ from PyQt6.QtWidgets import QApplication
 from audio_capturer import AudioCapturer, list_input_devices
 from audio_route import set_route
 from config import Config
+import session_store
 import settings_store
 from hud_gui import (Controls, HudSignals, HudWindow, bring_to_front, create_tray, make_accessory_app,
                      populate_projects)
@@ -200,6 +201,7 @@ def main() -> int:
     app.setQuitOnLastWindowClosed(False)  # ocultar el HUD no debe cerrar la app
     make_accessory_app()
 
+    session_store.PROJECT = cfg.knowledge_project
     llm = LLMClient(cfg)
     llm_error = ""
     try:
@@ -294,6 +296,7 @@ def main() -> int:
             app.quit()
             return
         hud.apply_appearance(cfg)
+        session_store.PROJECT = cfg.knowledge_project
         controls.screen.setChecked(cfg.screen_notes_enabled)
         if changed & LLM_SETTINGS:
             reload_llm("Configuración aplicada")
@@ -315,6 +318,7 @@ def main() -> int:
 
     def pick_project(name: str) -> None:
         cfg.knowledge_project = name
+        session_store.PROJECT = name
         settings_store.save(cfg)
         print(f"[config] Proyecto activo: {name}")
         reload_llm(f"Proyecto {name}")
